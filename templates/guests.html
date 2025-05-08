@@ -1,0 +1,67 @@
+{% extends "base.html" %} {% block content %}
+
+<h1 class="text-center mb-4">Guest List - Testing</h1>
+
+<div class="d-flex flex-wrap justify-content-center gap-2 mb-4">
+  <a href="{{ url_for('upload_csv') }}" class="btn btn-primary">
+    <i class="bi bi-upload me-2"></i> Upload CSV
+  </a>
+  <a href="{{ url_for('download_csv') }}" class="btn btn-success">
+    <i class="bi bi-download me-2"></i> Download CSV
+  </a>
+  <a href="{{ url_for('zip_qr_codes_web') }}" class="btn btn-warning">
+    <i class="bi bi-file-zip me-2"></i> Zip QR Codes
+  </a>
+  <a href="{{ url_for('regenerate_qr_codes') }}" class="btn btn-danger">
+    <i class="bi bi-arrow-clockwise me-2"></i> Regenerate Codes
+  </a>
+  <a href="{{ url_for('scan_qr') }}" class="btn btn-info">
+    <i class="bi bi-qr-code-scan me-2"></i> Scan QR
+  </a>
+</div>
+
+<table class="table table-striped">
+  <thead class="table-dark">
+    <tr>
+      <th>ID</th>
+      <th>Name</th>
+      <th>Phone</th>
+      <th>QR Code ID</th>
+      <th>QR Code</th>
+      <th>Has Entered</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for guest in guests %}
+    <tr>
+      <td>{{ guest.visual_id }}</td>
+      <td>{{ guest.name }}</td>
+      <td>{{ guest.phone }}</td>
+      <td>{{ guest.qr_code_id }}</td>
+      <td>
+        {% if guest.qr_code_url %}
+        <img src="{{ guest.qr_code_url }}" alt="QR Code" width="50" />
+        {% else %}
+        <span class="text-muted">No QR Code</span>
+        {% endif %}
+      </td>
+      <td>{{ "✅" if guest.has_entered else "❌" }}</td>
+      <td class="d-flex gap-2">
+        <a
+          href="{{ url_for('edit_guest', guest_id=guest.id) }}"
+          class="btn btn-sm btn-secondary"
+          >Edit</a
+        >
+        <a
+          href="{{ url_for('delete_guest', guest_id=guest.id) }}"
+          class="btn btn-sm btn-danger"
+          >Delete</a
+        >
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% endblock %}

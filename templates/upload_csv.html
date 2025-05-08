@@ -1,0 +1,43 @@
+{% extends "base.html" %} {% block content %}
+<h2 class="text-center mb-4">Upload CSV</h2>
+
+<form
+  method="POST"
+  enctype="multipart/form-data"
+  class="card p-4 shadow-sm mx-auto"
+  style="max-width: 500px"
+>
+  <div class="mb-3">
+    <label for="file" class="form-label">Choose CSV File</label>
+    <input
+      type="file"
+      name="file"
+      id="file"
+      accept=".csv"
+      class="form-control"
+      required
+    />
+    <div class="form-text">Please upload a CSV file containing guest data.</div>
+  </div>
+  <button type="submit" class="btn btn-primary w-100">
+    <i class="bi bi-upload me-2"></i> Upload
+  </button>
+</form>
+
+<script>
+  document.querySelector("form").addEventListener("submit", function (e) {
+    const fileInput = document.getElementById("file");
+    if (!fileInput.value) {
+      e.preventDefault();
+      alert("Please select a file to upload.");
+    } else {
+      const file = fileInput.files[0];
+      if (file.type !== "text/csv" && file.name.split(".").pop() !== "csv") {
+        e.preventDefault();
+        alert("Invalid file type. Please upload a .csv file.");
+        fileInput.value = "";
+      }
+    }
+  });
+</script>
+{% endblock %}
