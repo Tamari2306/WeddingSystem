@@ -18,6 +18,10 @@
   <a href="{{ url_for('scan_qr') }}" class="btn btn-info">
     <i class="bi bi-qr-code-scan me-2"></i> Scan QR
   </a>
+  <a href="{{ url_for('generate_guest_cards') }}" class="btn btn-info">
+    <i class="bi bi-arrow-clockwise me-2"></i>Generate All Guest Cards</a>
+  <a href="{{ url_for('download_all_cards') }}" class="btn btn-success">
+    <i class="bi bi-download me-2"></i>Download All Cards (ZIP)</a>
 </div>
 
 <table class="table table-striped">
@@ -30,6 +34,7 @@
       <th>QR Code</th>
       <th>Has Entered</th>
       <th>Actions</th>
+      <th>Card</th>
     </tr>
   </thead>
   <tbody>
@@ -59,6 +64,12 @@
           >Delete</a
         >
       </td>
+      <td>
+        <a href="{{ url_for('download_card', filename=guest.name.upper() ~ '.png') }}" class="btn btn-sm btn-primary">
+    Download
+</a>
+
+</td>
     </tr>
     {% endfor %}
   </tbody>
