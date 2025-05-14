@@ -375,7 +375,4 @@ def download_all_cards():
 
 # --- Main Entry ---
 if __name__ == '__main__':
-    if not os.path.exists('guests.db'):
-        Base.metadata.create_all(engine)
-        print("Database initialized.")
     app.run(debug=False, host='0.0.0.0', port=5000)
