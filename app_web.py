@@ -10,12 +10,19 @@ from functools import wraps
 from PIL import Image, ImageDraw, ImageFont
 import os, textwrap, shutil
 from dotenv import load_dotenv
+from config import DevelopmentConfig, ProductionConfig
+
 
 load_dotenv()  # Load environment variables from .env if it exists
 
 # --- Flask App Setup ---
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get("SECRET_KEY", "fallback-secret-key")
+env = os.getenv("FLASK_ENV", "development")
+
+if env == "production":
+    app.config.from_object(ProductionConfig)
+else:
+    app.config.from_object(DevelopmentConfig)
 
 UPLOAD_FOLDER = "uploads"
 QR_FOLDER_WEB = 'static/qr_codes'

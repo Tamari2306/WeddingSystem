@@ -1,23 +1,18 @@
 import os
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, create_engine
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
 from datetime import datetime
+from sqlalchemy.orm import sessionmaker, declarative_base, scoped_session
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 Base = declarative_base()
 
-# --- Database Connection using DATABASE_URL ---
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
-if DATABASE_URL:
-    engine = create_engine(DATABASE_URL)
-else:
-    # Handle the case where DATABASE_URL might not be set (e.g., local development)
-    # You might want to provide a fallback or raise an error.
-    print("Warning: DATABASE_URL environment variable not found.")
-    engine = None  # Or raise an exception
-
-SessionLocal = sessionmaker(bind=engine) if engine else None
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///guests.db")
+engine = create_engine(DATABASE_URL)
+SessionLocal = scoped_session(sessionmaker(bind=engine))
 
 # --- Models ---
 class Guest(Base):
