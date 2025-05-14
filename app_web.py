@@ -10,8 +10,6 @@ from functools import wraps
 from PIL import Image, ImageDraw, ImageFont
 import os, textwrap, shutil
 from dotenv import load_dotenv
-from config import DevelopmentConfig, ProductionConfig
-
 
 load_dotenv()  # Load environment variables from .env if it exists
 
