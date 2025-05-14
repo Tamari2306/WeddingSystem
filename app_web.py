@@ -9,6 +9,9 @@ from datetime import datetime
 from functools import wraps
 from PIL import Image, ImageDraw, ImageFont
 import os, textwrap, shutil
+from dotenv import load_dotenv
+
+load_dotenv()  # Load environment variables from .env if it exists
 
 # --- Flask App Setup ---
 app = Flask(__name__)
