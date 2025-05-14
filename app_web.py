@@ -17,12 +17,11 @@ load_dotenv()  # Load environment variables from .env if it exists
 
 # --- Flask App Setup ---
 app = Flask(__name__)
-env = os.getenv("FLASK_ENV", "development")
 
-if env == "production":
-    app.config.from_object(ProductionConfig)
+if os.environ.get("FLASK_ENV") == "development":
+    load_dotenv(".env.local")
 else:
-    app.config.from_object(DevelopmentConfig)
+    load_dotenv(".env")
 
 UPLOAD_FOLDER = "uploads"
 QR_FOLDER_WEB = 'static/qr_codes'
