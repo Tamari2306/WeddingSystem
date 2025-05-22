@@ -1,26 +1,49 @@
-{% extends "base.html" %} {% block content %}
+{% extends "base.html" %}
+
+{% block content %}
 <h2 class="text-center mb-4">Edit Guest</h2>
 
 <form method="POST" class="card p-4 shadow-sm mx-auto" style="max-width: 500px">
   <div class="mb-3">
-    <label class="form-label">Name</label>
+    <label for="name" class="form-label">Name</label>
     <input
       type="text"
       name="name"
       class="form-control"
+      id="name"
       value="{{ guest.name }}"
       required
     />
   </div>
+
   <div class="mb-3">
-    <label class="form-label">Phone</label>
+    <label for="phone" class="form-label">Phone</label>
     <input
       type="text"
       name="phone"
       class="form-control"
+      id="phone"
       value="{{ guest.phone }}"
       required
     />
+  </div>
+
+  <div class="mb-3">
+    <label for="card_type" class="form-label">Card Type</label>
+    <select class="form-control" id="card_type" name="card_type" required>
+        <option value="single" {% if guest.card_type == 'single' %}selected{% endif %}>Single</option>
+        <option value="double" {% if guest.card_type == 'double' %}selected{% endif %}>Double</option>
+        </select>
+  </div>
+  <div class="mb-3 form-check">
+    <input
+      type="checkbox"
+      class="form-check-input"
+      id="has_entered"
+      name="has_entered"
+      {% if guest.has_entered %}checked{% endif %}
+    />
+    <label class="form-check-label" for="has_entered">Has Entered</label>
   </div>
   <button type="submit" class="btn btn-success w-100">Save Changes</button>
 </form>
