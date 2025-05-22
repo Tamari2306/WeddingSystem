@@ -1,35 +1,12 @@
-from logging.config import fileConfig
-
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-
-from alembic import context
-
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
-config = context.config
-
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
-
-# add your model's MetaData object here
-# for 'autogenerate' support
-# from myapp import mymodel
-# target_metadata = mymodel.Base.metadata
-
-
-
-
 # migrations/env.py
 
 import sys
-import os
+import os # <-- Ensure this is imported
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
+from sqlalchemy import create_engine # <-- Ensure this is imported
 
 from alembic import context
 
@@ -51,10 +28,7 @@ if config.config_file_name is not None:
 
 # add your model's MetaData object here
 # for 'autogenerate' support
-# from myapp import Base
-# target_metadata = Base.metadata
-target_metadata = Base.metadata 
-
+target_metadata = Base.metadata # <-- This line is correct for your setup
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
@@ -93,11 +67,20 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    # --- MODIFIED SECTION STARTS HERE ---
+    database_url = os.getenv("DATABASE_URL")
+
+    if database_url:
+        # Use the environment variable if available (for Render)
+        connectable = create_engine(database_url)
+    else:
+        # Fallback to alembic.ini config (for local development)
+        connectable = engine_from_config(
+            config.get_section(config.config_ini_section, {}),
+            prefix="sqlalchemy.",
+            poolclass=pool.NullPool,
+        )
+    # --- MODIFIED SECTION ENDS HERE ---
 
     with connectable.connect() as connection:
         context.configure(
