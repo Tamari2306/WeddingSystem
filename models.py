@@ -34,6 +34,7 @@ class Guest(Base):
     entry_time = Column(DateTime, default=None)
     visual_id = Column(Integer, nullable=False)
     card_type = Column(String, default="single", nullable=False) # e.g., "single" or "double"
+    notes = Column(String)
 
     def __repr__(self):
         return f"<Guest(name='{self.name}', phone='{self.phone}', card_type='{self.card_type}')>"
