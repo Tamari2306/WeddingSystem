@@ -1,7 +1,7 @@
 # migrations/env.py
 
 import sys
-import os # <-- Ensure this is imported
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
@@ -28,7 +28,27 @@ if config.config_file_name is not None:
 
 # add your model's MetaData object here
 # for 'autogenerate' support
-target_metadata = Base.metadata # <-- This line is correct for your setup
+target_metadata = Base.metadata
+
+# --- NEW ADDITION/MODIFICATION STARTS HERE ---
+# Set the SQLAlchemy URL from the DATABASE_URL environment variable first.
+# This ensures that both online and potentially other parts of Alembic's
+# configuration consistently use the Render-provided URL.
+database_url = os.getenv("DATABASE_URL")
+
+if database_url:
+    config.set_main_option("sqlalchemy.url", database_url)
+else:
+    # Optional: If you're using python-dotenv for local development and
+    # relying on a .env file, uncomment the following:
+    # from dotenv import load_dotenv
+    # load_dotenv() # Load .env file
+    # config.set_main_option("sqlalchemy.url", os.getenv("LOCAL_DATABASE_URL", "sqlite:///./test.db"))
+    # If DATABASE_URL is not set and you are not using a .env file,
+    # it will fall back to what's in alembic.ini (which is often localhost)
+    # This block essentially keeps your local development flow working.
+    pass
+# --- NEW ADDITION/MODIFICATION ENDS HERE ---
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
@@ -48,7 +68,7 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = config.get_main_option("sqlalchemy.url")
+    url = config.get_main_option("sqlalchemy.url") # This will now pick up DATABASE_URL if set
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -67,20 +87,11 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    # --- MODIFIED SECTION STARTS HERE ---
-    database_url = os.getenv("DATABASE_URL")
-
-    if database_url:
-        # Use the environment variable if available (for Render)
-        connectable = create_engine(database_url)
-    else:
-        # Fallback to alembic.ini config (for local development)
-        connectable = engine_from_config(
-            config.get_section(config.config_ini_section, {}),
-            prefix="sqlalchemy.",
-            poolclass=pool.NullPool,
-        )
-    # --- MODIFIED SECTION ENDS HERE ---
+    connectable = engine_from_config( # This will now pick up DATABASE_URL because it's set in config
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
 
     with connectable.connect() as connection:
         context.configure(
