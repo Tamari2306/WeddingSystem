@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_file, make_response, current_app
 from werkzeug.utils import secure_filename
-from models import Base, Guest, SessionLocal, engine  # Reuse centralized model
+from models import Base, Guest # CORRECTED: Only import Base and Guest
 from sqlalchemy.sql import func
 from sqlalchemy.exc import IntegrityError
 import os, qrcode, csv, zipfile, logging
@@ -10,16 +10,39 @@ from functools import wraps
 from PIL import Image, ImageDraw, ImageFont # Make sure Pillow is installed: pip install Pillow
 import textwrap # For text wrapping on images
 import shutil # For clearing folder, already present
-from dotenv import load_dotenv
 
+# IMPORTANT: Use dotenv_values to get the values from the specific file first
+# or load_dotenv with override=True.
+from dotenv import dotenv_values, load_dotenv # Import both
 
-# This ensures .env.local is always loaded when running app_web.py directly.
-load_dotenv()
+# --- Environment Variable Loading Strategy ---
+# You can control which .env file is loaded using the FLASK_ENV environment variable.
+# For local development/testing: Set FLASK_ENV=development before running your app.
+# For production/real data: Either don't set FLASK_ENV, or set FLASK_ENV=production.
+
+flask_env = os.getenv('FLASK_ENV', 'production') # Default to 'production' if FLASK_ENV is not set
+
+if flask_env == 'development':
+    current_env_file = '.env.development'
+    logging.info("Loading environment from .env.development")
+else:
+    current_env_file = '.env'
+    logging.info("Loading environment from .env")
+
+# Load the desired .env file explicitly.
+# dotenv_values reads the file into a dictionary without directly modifying os.environ yet.
+config = dotenv_values(current_env_file)
+
+# Then, explicitly set os.environ based on the loaded config.
+# This ensures that these values take precedence.
+for key, value in config.items():
+    if value is not None:
+        os.environ[key] = value
 
 # --- Configuration for Database ---
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise ValueError("DATABASE_URL environment variable is not set.")
+# DB_FILE will now be correctly picked up from the loaded environment variables
+DB_FILE = os.getenv("DB_FILE", "guests.db") # Default to guests.db if DB_FILE is somehow still not set
+DATABASE_URL = f"sqlite:///./{DB_FILE}"
 
 # --- Flask Application Initialization ---
 app = Flask(__name__)
@@ -30,25 +53,28 @@ app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
 # Ensure the SECRET_KEY is set, as it's critical for session security
 if not app.config['SECRET_KEY']:
     raise ValueError("SECRET_KEY environment variable is not set. "
-                     "Please set a strong, random key in your .env or .env.local file.")
+                     "Please set a strong, random key in your .env or .env.development file.")
 
 # --- Folder Configurations ---
 UPLOAD_FOLDER = "uploads"
 QR_FOLDER_WEB = 'static/qr_codes'
-GUEST_CARDS_FOLDER = 'static/guest_cards' # New constant for guest cards output folder
+GUEST_CARDS_FOLDER = 'static/guest_cards'
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['QR_FOLDER_WEB'] = QR_FOLDER_WEB
-app.config['GUEST_CARDS_FOLDER'] = GUEST_CARDS_FOLDER # Add to app config
+app.config['GUEST_CARDS_FOLDER'] = GUEST_CARDS_FOLDER
 
 # Create necessary directories if they don't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(QR_FOLDER_WEB, exist_ok=True)
-os.makedirs(GUEST_CARDS_FOLDER, exist_ok=True) # Ensure guest_cards folder exists
+os.makedirs(GUEST_CARDS_FOLDER, exist_ok=True)
 
 # --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Log which database is being used
+logging.info(f"Using database: {DATABASE_URL}")
 
 # --- Admin Credentials (Read from environment or fallback) ---
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
@@ -98,9 +124,11 @@ def view_all():
     session = SessionLocal()
     try:
         guests = session.query(Guest).order_by(Guest.visual_id).all()
-        return render_template('guests.html', guests=guests)
+        # Pass flask_env to the template context
+        return render_template('guests.html', guests=guests, current_environment=flask_env)
     finally:
         session.close()
+
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -258,7 +286,7 @@ def scan_qr():
     return render_template('scan_qr.html')
 
 
-# ----- Delete -----
+# ----- Delete Individual Guest -----
 @app.route('/delete_guest/<int:guest_id>', methods=['GET'])
 @login_required
 def delete_guest(guest_id):
@@ -415,8 +443,8 @@ def generate_guest_cards():
             qr_file_abs_path = os.path.join(current_app.root_path, qr_file_relative_path)
 
             if not os.path.exists(qr_file_abs_path):
-                 current_app.logger.warning(f"QR code file not found for guest {guest.name}: {qr_file_abs_path}. Skipping card generation.")
-                 continue # Skip this guest's card if QR code is missing
+                    current_app.logger.warning(f"QR code file not found for guest {guest.name}: {qr_file_abs_path}. Skipping card generation.")
+                    continue # Skip this guest's card if QR code is missing
 
             qr_img = Image.open(qr_file_abs_path).resize((320, 320))
             qr_x = (W - qr_img.width) // 2
@@ -433,7 +461,7 @@ def generate_guest_cards():
             card_type_x = W - card_type_width - right_margin
             card_type_y = qr_y + total_text_height + 220 # Just below name, adjust spacing
             
-            draw.text((card_type_x, card_type_y), card_type_text, font=card_type_font, fill="#FF0000") # Using a blue color
+            draw.text((card_type_x, card_type_y), card_type_text, font=card_type_font, fill="#FF0000")
 
 
             # Save card with guest name
@@ -458,8 +486,6 @@ def generate_guest_cards():
 @app.route('/download_card/<string:filename>')
 @login_required
 def download_card(filename):
-    # This route now downloads the *generated guest cards* from GUEST_CARDS_FOLDER
-    # NOT the raw QR codes from QR_FOLDER_WEB.
     output_folder = current_app.config['GUEST_CARDS_FOLDER'] # Use the correct folder for cards
 
     file_path = os.path.join(output_folder, filename)
@@ -495,9 +521,66 @@ def download_all_cards():
     zip_buffer.seek(0)
     return send_file(zip_buffer, download_name="invitation_cards.zip", as_attachment=True)
 
+# ----- Clear All Data Route (NEW) -----
+@app.route('/clear_all_data', methods=['GET'])
+@login_required # Only logged-in admins can do this!
+def clear_all_data():
+    session = SessionLocal()
+    try:
+        # Delete all guests from the database
+        num_deleted_guests = session.query(Guest).delete()
+        session.commit()
+        flash(f"Successfully deleted {num_deleted_guests} guests from the database.", "success")
+        current_app.logger.info(f"Cleared {num_deleted_guests} guests from {DATABASE_URL}")
+
+        # Clear QR code folder
+        qr_folder = current_app.config['QR_FOLDER_WEB']
+        for filename in os.listdir(qr_folder):
+            file_path = os.path.join(qr_folder, filename)
+            try:
+                if os.path.isfile(file_path):
+                    os.unlink(file_path)
+            except Exception as e:
+                current_app.logger.error(f"Error deleting QR file {file_path}: {e}")
+                flash(f"Error deleting QR file {filename}: {e}", "warning")
+        flash(f"Cleared QR codes from '{qr_folder}'.", "success")
+        current_app.logger.info(f"Cleared QR codes from {qr_folder}")
+
+        # Clear Guest Cards folder
+        guest_cards_folder = current_app.config['GUEST_CARDS_FOLDER']
+        for filename in os.listdir(guest_cards_folder):
+            file_path = os.path.join(guest_cards_folder, filename)
+            try:
+                if os.path.isfile(file_path):
+                    os.unlink(file_path)
+            except Exception as e:
+                current_app.logger.error(f"Error deleting guest card {file_path}: {e}")
+                flash(f"Error deleting guest card {filename}: {e}", "warning")
+        flash(f"Cleared guest cards from '{guest_cards_folder}'.", "success")
+        current_app.logger.info(f"Cleared guest cards from {guest_cards_folder}")
+
+
+        return redirect(url_for('view_all'))
+
+    except Exception as e:
+        session.rollback()
+        flash(f"An error occurred while clearing data: {e}", "danger")
+        current_app.logger.error(f"Error clearing all data: {e}", exc_info=True)
+        return redirect(url_for('view_all'))
+    finally:
+        session.close()
+
 # --- Main Entry ---
+# Moved engine and SessionLocal creation here, to ensure they use the DATABASE_URL
+# defined in app_web.py.
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
 if __name__ == '__main__':
     # Initialize database tables if they don't exist
-    # Be careful with this in production; migrations are better
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine) # This creates tables in the currently configured DB_FILE
     app.run(debug=False, host='0.0.0.0', port=5000)
