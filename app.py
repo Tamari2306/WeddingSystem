@@ -568,7 +568,8 @@ def edit_guest(guest_id):
                 guest.has_entered = 'has_entered' in request.form
 
                 new_card_type_raw = request.form.get('card_type', guest.card_type)
-                new_card_type, _ = normalize_card_type(new_card_type_raw)
+                group_size_raw = request.form.get('group_size', '').strip()
+                new_card_type, _ = normalize_card_type(new_card_type_raw, group_size_raw or None)
 
                 if new_card_type == "family":
                     try:
