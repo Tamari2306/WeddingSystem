@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Guest Report</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <style>
+        body {
+            background-color: #f8f9fa;
+            font-family: 'Inter', sans-serif;
+        }
+        .card-report {
+            min-height: 180px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            border-radius: 0.75rem;
+            color: white;
+            font-weight: 600;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .report-number {
+            font-size: 2.5rem;
+        }
+        @media (max-width: 768px) {
+            .card-report { margin-bottom: 15px; }
+        }
+    </style>
+</head>
+<body>
+<div class="container my-5">
+    <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap">
+        <h1>Guest Report</h1>
+        <a href="{{ url_for('view_all') }}" class="btn btn-primary mt-2 mt-md-0">Back to Dashboard</a>
+    </div>
+
+    <div class="row g-4 text-center">
+        <!-- Total Guests -->
+        <div class="col-md-2 col-6">
+            <div class="card bg-primary card-report">
+                <div class="card-body">
+                    <h5>Total Guests</h5>
+                    <p id="total-guests" class="report-number">0</p>
+                </div>
+            </div>
+        </div>
+        <!-- Single Cards -->
+        <div class="col-md-2 col-6">
+            <div class="card bg-success card-report">
+                <div class="card-body">
+                    <h5>Single Cards</h5>
+                    <p id="single-cards" class="report-number">0</p>
+                </div>
+            </div>
+        </div>
+        <!-- Double Cards -->
+        <div class="col-md-2 col-6">
+            <div class="card bg-warning card-report">
+                <div class="card-body">
+                    <h5>Double Cards</h5>
+                    <p id="double-cards" class="report-number">0</p>
+                </div>
+            </div>
+        </div>
+        <!-- Family Cards -->
+        <div class="col-md-2 col-6">
+            <div class="card bg-info card-report">
+                <div class="card-body">
+                    <h5>Family Cards</h5>
+                    <p id="family-cards" class="report-number">0</p>
+                </div>
+            </div>
+        </div>
+        <!-- Guests Entered -->
+        <div class="col-md-2 col-6">
+            <div class="card bg-success card-report">
+                <div class="card-body">
+                    <h5>Guests Entered</h5>
+                    <p id="entered-guests" class="report-number">0</p>
+                </div>
+            </div>
+        </div>
+        <!-- Guests Not Entered -->
+        <div class="col-md-2 col-6">
+            <div class="card bg-danger card-report">
+                <div class="card-body">
+                    <h5>Guests Not Entered</h5>
+                    <p id="not-entered-guests" class="report-number">0</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://code.jquery.com/jquery-3.6.4.min.js"></script>
+<script>
+function fetchReport() {
+    $.getJSON("{{ url_for('guest_report_data') }}", function(data) {
+        $('#total-guests').text(data.total_guests);
+        $('#single-cards').text(data.single_cards);
+        $('#double-cards').text(data.double_cards);
+        $('#family-cards').text(data.family_cards);  // Added family card
+        $('#entered-guests').text(data.entered_guests);
+        $('#not-entered-guests').text(data.not_entered_guests);
+    });
+}
+
+// Initial load
+fetchReport();
+// Update every 10 seconds
+setInterval(fetchReport, 10000);
+</script>
+</body>
+</html>

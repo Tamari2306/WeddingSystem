@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Guest Dashboard</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
+
+    <style>
+        body { font-family: Arial, sans-serif; }
+        .hidden { display: none; }
+    </style>
+
+    <script>
+        function updateAllowedField() {
+            const type = document.getElementById("card_type").value;
+            const allowedGroup = document.getElementById("allowed_group");
+            if (type === "family") {
+                allowedGroup.classList.remove("hidden");
+            } else {
+                allowedGroup.classList.add("hidden");
+            }
+        }
+    </script>
+</head>
+<body class="bg-light p-4">
+
+<div class="container">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1>Guests</h1>
+        <a href="{{ url_for('guest_report') }}" class="btn btn-primary">View Report</a>
+    </div>
+
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+        {% for category, message in messages %}
+        <div class="alert alert-{{ 'danger' if category=='danger' else 'success' }}">
+            {{ message }}
+        </div>
+        {% endfor %}
+    {% endif %}
+    {% endwith %}
+
+    <!-- Add Guest Form -->
+    <div class="card mb-4">
+        <div class="card-body">
+            <h4 class="card-title">Add New Guest</h4>
+            <form method="POST" action="{{ url_for('add_guest') }}">
+                <div class="form-row">
+                    <div class="form-group col-md-4">
+                        <label>Guest Name</label>
+                        <input type="text" name="guest_name" class="form-control" required>
+                    </div>
+                    <div class="form-group col-md-2">
+                        <label>Visual ID</label>
+                        <input type="number" name="visual_id" class="form-control" required>
+                    </div>
+                    <div class="form-group col-md-3">
+                        <label>Card Type</label>
+                        <select name="card_type" id="card_type" class="form-control" onchange="updateAllowedField()" required>
+                            <option value="single">Single</option>
+                            <option value="double">Double</option>
+                            <option value="family">Family</option>
+                        </select>
+                    </div>
+                    <div class="form-group col-md-3 hidden" id="allowed_group">
+                        <label>Allowed Number (Family Only)</label>
+                        <input type="number" name="allowed" min="1" class="form-control" placeholder="Enter total allowed guests">
+                    </div>
+                </div>
+
+                <!-- Assign Events -->
+                <div class="form-group">
+                    <label>Assign Events</label><br>
+                    {% for event in events %}
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="checkbox" name="event_ids" value="{{ event.id }}">
+                            <label class="form-check-label">{{ event.name }}</label>
+                        </div>
+                    {% endfor %}
+                </div>
+
+                <button type="submit" class="btn btn-success">Add Guest</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Guest List -->
+    <h4>Guest List</h4>
+    <table class="table table-bordered table-striped">
+        <thead class="thead-light">
+            <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Card Type</th>
+                <th>Events</th>
+                <th>Has Entered</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for guest in guests %}
+            <tr>
+                <td>{{ guest.visual_id }}</td>
+                <td>{{ guest.name }}</td>
+                <td>
+                    {% if guest.card_type == 'family' %}
+                        Family ({{ guest.group_size }} allowed)
+                    {% else %}
+                        {{ guest.card_type|capitalize }}
+                    {% endif %}
+                </td>
+                <td>
+                    {% for event in guest.events %}
+                        <span class="badge badge-info">{{ event.name }}</span>
+                    {% endfor %}
+                </td>
+                <td>{{ "Yes" if guest.has_entered else "No" }}</td>
+                <td>
+                    <a href="{{ url_for('edit_guest', guest_id=guest.id) }}" class="btn btn-sm btn-primary">Edit</a>
+                    <a href="{{ url_for('delete_guest', guest_id=guest.id) }}" class="btn btn-sm btn-danger" onclick="return confirm('Are you sure?')">Delete</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+
+
+<!-- Back to Top Button -->
+<button id="backToTopBtn" title="Go to top" 
+    class="btn btn-primary"
+    style="position: fixed; bottom: 30px; right: 30px; display: none; z-index: 1000;">
+    ↑ Top
+</button>
+
+
+<script>
+// Get the button
+let backToTopBtn = document.getElementById("backToTopBtn");
+
+// Show button when user scrolls down 300px
+window.onscroll = function() {scrollFunction()};
+
+function scrollFunction() {
+    if (document.body.scrollTop > 300 || document.documentElement.scrollTop > 300) {
+        backToTopBtn.style.display = "block";
+    } else {
+        backToTopBtn.style.display = "none";
+    }
+}
+
+// Scroll to top when button clicked
+backToTopBtn.addEventListener("click", function(){
+    window.scrollTo({top: 0, behavior: 'smooth'});
+});
+</script>
+
+
+</body>
+</html>

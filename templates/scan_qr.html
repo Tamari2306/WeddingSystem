@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Scan QR Code</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+      #reader { width: 480px; max-width:100%; margin: 0 auto; border-radius: 8px; padding: 8px; box-shadow: 0 6px 18px rgba(0,0,0,0.12); }
+      .remaining { font-weight:700; font-size:1.1rem; }
+    </style>
+  </head>
+  <body>
+    <div class="container mt-4">
+      <h3 class="text-center mb-3">Scan Guest Invitation</h3>
+
+      <div id="reader"></div>
+
+      <div id="result" class="mt-4 text-center"></div>
+
+      <div class="text-center mt-3">
+        <a href="/" class="btn btn-secondary">Back to Dashboard</a>
+      </div>
+    </div>
+
+    <script>
+      let lastScanned = null;
+      function showCard(statusClass, title, html) {
+        document.getElementById('result').innerHTML = `
+          <div class="card border-${statusClass} mx-auto" style="max-width:520px;">
+            <div class="card-body text-${statusClass}">
+              <h5 class="card-title">${title}</h5>
+              ${html}
+            </div>
+          </div>
+        `;
+      }
+
+      function onScanSuccess(qrMessage) {
+        if (qrMessage === lastScanned) return;
+        lastScanned = qrMessage;
+        showCard('info', 'Processing...', '<div class="spinner-border" role="status"></div>');
+
+        fetch('/update_status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ qr_code_id: qrMessage })
+        })
+        .then(r => r.json())
+        .then(data => {
+          if (data.success) {
+            const g = data.guest;
+            const remaining = g.remaining_entries;
+            const remHtml = `<p class="mb-1"><strong>ID:</strong> ${g.visual_id || 'N/A'}</p>
+                             <p class="mb-1"><strong>Name:</strong> ${g.name}</p>
+                             <p class="mb-1"><strong>Card type:</strong> ${g.card_type}</p>
+                             <p class="remaining ${remaining>0? 'text-success':'text-danger'}">Remaining entries: ${remaining}</p>`;
+            showCard('success', 'Check-in successful', remHtml);
+          } else if (data.already_entered) {
+            const g = data.guest || {};
+            const remHtml = `<p class="mb-1"><strong>ID:</strong> ${g.visual_id || 'N/A'}</p>
+                             <p class="mb-1"><strong>Name:</strong> ${g.name || 'N/A'}</p>
+                             <p class="remaining text-danger">Remaining entries: ${g.remaining_entries ?? 0}</p>`;
+            showCard('danger', 'No entries remaining', remHtml);
+          } else {
+            showCard('warning', 'Not found', `<p>${data.message || 'Guest not found.'}</p>`);
+          }
+        })
+        .catch(err => {
+          console.error(err);
+          showCard('danger', 'Error', '<p>An error occurred while contacting the server.</p>');
+        });
+
+        setTimeout(() => {
+          lastScanned = null;
+          // keep result visible for 6 seconds
+        }, 6000);
+      }
+
+      function onScanError(err) { /* optional */ }
+
+      const scanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: 360 });
+      scanner.render(onScanSuccess, onScanError);
+    </script>
+  </body>
+</html>

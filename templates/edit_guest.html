@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2 class="text-center mb-4">Edit Guest</h2>
+
+<form method="POST" class="card p-4 shadow-sm mx-auto" style="max-width: 500px">
+  
+  <!-- NAME -->
+  <div class="mb-3">
+    <label for="name" class="form-label">Name</label>
+    <input
+      type="text"
+      name="name"
+      class="form-control"
+      id="name"
+      value="{{ guest.name }}"
+      required
+    />
+  </div>
+
+  <!-- PHONE -->
+  <div class="mb-3">
+    <label for="phone" class="form-label">Phone</label>
+    <input
+      type="text"
+      name="phone"
+      class="form-control"
+      id="phone"
+      value="{{ guest.phone }}"
+      required
+    />
+  </div>
+
+  <!-- CARD TYPE -->
+  <div class="mb-3">
+    <label for="card_type" class="form-label">Card Type</label>
+    <select class="form-control" id="card_type" name="card_type" required>
+        <option value="single" {% if guest.card_type == 'single' %}selected{% endif %}>Single</option>
+        <option value="double" {% if guest.card_type == 'double' %}selected{% endif %}>Double</option>
+        <option value="family" {% if guest.card_type == 'family' %}selected{% endif %}>Family</option>
+    </select>
+  </div>
+
+  <!-- FAMILY GROUP SIZE -->
+  <div class="mb-3" id="group_size_wrapper" style="display: none;">
+    <label for="group_size" class="form-label">Group Size (Family Only)</label>
+    <input
+      type="number"
+      name="group_size"
+      class="form-control"
+      id="group_size"
+      min="1"
+      value="{{ guest.group_size }}"
+    />
+  </div>
+
+  <!-- HAS ENTERED -->
+  <div class="mb-3 form-check">
+    <input
+      type="checkbox"
+      class="form-check-input"
+      id="has_entered"
+      name="has_entered"
+      {% if guest.has_entered %}checked{% endif %}
+    />
+    <label class="form-check-label" for="has_entered">Has Entered</label>
+  </div>
+
+  <button type="submit" class="btn btn-success w-100">Save Changes</button>
+</form>
+
+<script>
+  // Show / hide group size input
+  function toggleGroupSize() {
+    const cardType = document.getElementById("card_type").value;
+    const wrapper = document.getElementById("group_size_wrapper");
+
+    if (cardType === "family") {
+      wrapper.style.display = "block";
+    } else {
+      wrapper.style.display = "none";
+    }
+  }
+
+  document.getElementById("card_type").addEventListener("change", toggleGroupSize);
+
+  // Run once on page load
+  toggleGroupSize();
+</script>
+
+{% endblock %}

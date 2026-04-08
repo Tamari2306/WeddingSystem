@@ -1,0 +1,54 @@
+That's an excellent and crucial consideration. Preserving your existing data is the top priority\!
+
+You are correct that simply changing the models in your main `app.py` would cause the existing `guests.db` file to break, as the structure is fundamentally different (it's missing the `client` and `event` columns).
+
+Here is a clear plan to implement the multi-tenant system **without affecting your original `guests.db`**.
+
+-----
+
+## 1\. Do Not Use the Same Database File
+
+The easiest and safest way to keep your original data intact is to simply **stop pointing the new application code to the old file.**
+
+In the separate test file I provided (`app_multitenant.py`), I already implemented this by changing the database connection string:
+
+```python
+# In app_multitenant.py
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///test_multitenant_guests.db' # Using a new DB file
+```
+
+This creates a completely new database file called **`test_multitenant_guests.db`** (or whatever you name it) which only contains the mock data and the new, complex tables. Your original **`guests.db`** remains untouched and safe.
+
+-----
+
+## 2\. Implementing the Change in the Main App
+
+If you decide the multi-tenant model works and you want to use it for your main application, you have two choices:
+
+### Option A: Clean Migration (Recommended)
+
+1.  **Backup:** Make a copy of your original `guests.db` file just in case.
+
+2.  **Rename:** Rename your existing `app.py` to `app_legacy.py`.
+
+3.  **Use the New Code:** Rename the functional test code, `app_multitenant.py`, to **`app.py`**.
+
+4.  **Change Database Name:** If you want the new version to use the name `guests.db`, you would change the configuration in your new `app.py` back to:
+
+    ```python
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///guests.db' 
+    ```
+
+    When Flask runs this new `app.py`, it will look for `guests.db`. If that file is gone (because you backed it up or moved it), it will create a **new** `guests.db` with the new schema and mock data. You would then need to manually re-enter your old client/guest data into the new structure.
+
+### Option B: Merging Databases (Advanced)
+
+If you have a lot of data in the old `guests.db` and you want to keep it, you must perform a complex **database migration**. This involves:
+
+1.  **Create New Tables:** Adding the new `Client`, `Event`, and `GuestEventAccess` tables to the existing `guests.db`.
+2.  **Populate Client Data:** Creating a single "Default Client" record, and then updating every existing `Guest` record to point to that new `Client ID`.
+3.  **Populate Event Data:** Creating a single "Default Event" record, and then updating every existing `CheckIn` record and creating new `GuestEventAccess` records to link to that `Event ID`.
+
+**For now, focus on testing the system in the separate `app_multitenant.py` file with its own database. It's the cleanest, safest way to proceed.** Once you are satisfied, the **Clean Migration (Option A)** is the most straightforward path.
+
+Do you have any questions about the new logic, or would you like to see how to add new guests and link them to specific events in the test code?

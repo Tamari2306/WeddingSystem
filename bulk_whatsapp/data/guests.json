@@ -1,0 +1,14 @@
+[
+  {
+    "name": "John Doe",
+    "phone": "255712345678",
+    "card": "A001",
+    "inviteImage": "https://example.com/cardA001.jpg"
+  },
+  {
+    "name": "Mary Anna",
+    "phone": "255769111222",
+    "card": "A002",
+    "inviteImage": "https://example.com/cardA002.jpg"
+  }
+]

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card mx-auto shadow-sm" style="max-width:640px;">
+  <div class="card-body">
+    <h2 class="card-title text-center mb-3">Upload Guests (CSV)</h2>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <form method="POST" enctype="multipart/form-data">
+      <div class="form-group">
+        <label for="file">CSV File</label>
+        <input required class="form-control-file" type="file" id="file" name="file" accept=".csv">
+        <small class="form-text text-muted">Required columns: name, phone. Optional: card_type (single/double/family), group_size (if family).</small>
+      </div>
+
+      <div class="d-flex mt-3">
+        <button class="btn btn-primary mr-2" type="submit">Upload</button>
+        <a href="{{ url_for('view_all') }}" class="btn btn-secondary">Back to Dashboard</a>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+document.querySelector('form').addEventListener('submit', function(e){
+  const f = document.getElementById('file');
+  if (!f.value) { e.preventDefault(); alert('Please select a CSV file.'); }
+  else {
+    const name = f.value.toLowerCase();
+    if (!name.endsWith('.csv')) { e.preventDefault(); alert('Only .csv files allowed.'); f.value = ''; }
+  }
+});
+</script>
+{% endblock %}
