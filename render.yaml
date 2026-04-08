@@ -1,7 +1,25 @@
 services:
   - type: web
-    name: wedding-app
-    env: python
-    buildCommand: ""
-    startCommand: gunicorn app_web:app
-    plan: free
+    name: wedding-guest-system
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 2 --bind 0.0.0.0:$PORT --timeout 120
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: SECRET_KEY
+        generateValue: true          # Render auto-generates a secure value
+      - key: ADMIN_USERNAME
+        sync: false                  # You'll set this in the Render dashboard
+      - key: ADMIN_PASSWORD
+        sync: false                  # You'll set this in the Render dashboard
+      - key: DATABASE_URL
+        sync: false                  # Paste your Supabase PostgreSQL URL here
+      - key: SUPABASE_URL
+        sync: false                  # e.g. https://xxxx.supabase.co
+      - key: SUPABASE_SERVICE_KEY
+        sync: false                  # Your Supabase service_role key
+      - key: SUPABASE_QR_BUCKET
+        value: qr-codes
+      - key: SUPABASE_CARDS_BUCKET
+        value: guest-cards

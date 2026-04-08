@@ -1,10 +1,10 @@
-# app.py - corrected version
+# app.py — Render + Supabase deployment version
 import os
+import io
 import logging
 import qrcode
 import csv
 import zipfile
-import shutil
 import textwrap
 import tempfile
 from io import BytesIO, StringIO
@@ -17,111 +17,146 @@ from flask import (
     session, jsonify, send_file, make_response, current_app
 )
 from werkzeug.utils import secure_filename
-
 from dotenv import dotenv_values, load_dotenv
-
-from PIL import Image, ImageDraw, ImageFont  # Pillow
+from PIL import Image, ImageDraw, ImageFont
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.formatting.rule import CellIsRule
-
 from sqlalchemy.sql import func
 from sqlalchemy.exc import IntegrityError
 
-# IMPORT THESE FROM MODELS.PY!
-# models.py must expose: Guest, init_db, get_db_session
+# Supabase client
+from supabase import create_client, Client
+
 from models import Guest, init_db, get_db_session
 
-# --- Environment Variable Loading Strategy ---
+# ---------------------------------------------------------------------------
+# Environment Loading
+# ---------------------------------------------------------------------------
 flask_env = os.getenv('FLASK_ENV', 'production')
 
 if flask_env == 'development':
     current_env_file = '.env.development'
-    logging.info("Loading environment from .env.development")
 else:
     current_env_file = '.env'
-    logging.info("Loading environment from .env")
 
-config = {}
 if os.path.exists(current_env_file):
     config = dotenv_values(current_env_file)
     for key, value in config.items():
         if value is not None:
             os.environ[key] = value
 else:
-    logging.warning(f"Environment file {current_env_file} not found; using existing environment variables.")
+    logging.warning(f"Env file {current_env_file} not found; using existing env vars.")
 
-# --- Configuration for Database ---
-DB_FILE = os.getenv("DB_FILE", "guests.db")
-DATABASE_URL = f"sqlite:///./{DB_FILE}"
+# ---------------------------------------------------------------------------
+# Database Configuration
+# ---------------------------------------------------------------------------
+# In production: Supabase gives you a DATABASE_URL (PostgreSQL).
+# In development: fall back to SQLite via DB_FILE.
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    DB_FILE = os.getenv("DB_FILE", "guests.db")
+    DATABASE_URL = f"sqlite:///./{DB_FILE}"
 
-# --- Flask Application Initialization ---
+# Supabase sometimes returns postgres:// but SQLAlchemy needs postgresql://
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# ---------------------------------------------------------------------------
+# Supabase Storage Configuration
+# ---------------------------------------------------------------------------
+SUPABASE_URL = os.getenv("SUPABASE_URL")          # e.g. https://xxxx.supabase.co
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")  # service_role key (not anon key)
+QR_BUCKET = os.getenv("SUPABASE_QR_BUCKET", "qr-codes")
+CARDS_BUCKET = os.getenv("SUPABASE_CARDS_BUCKET", "guest-cards")
+
+supabase: Client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    logging.info("Supabase client initialized.")
+else:
+    logging.warning("SUPABASE_URL or SUPABASE_SERVICE_KEY not set — storage features disabled.")
+
+# ---------------------------------------------------------------------------
+# Flask App
+# ---------------------------------------------------------------------------
 app = Flask(__name__)
 
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
 if not app.config['SECRET_KEY']:
-    raise ValueError("SECRET_KEY environment variable is not set. Please set a strong, random key in your .env or .env.development file.")
+    raise ValueError("SECRET_KEY environment variable is not set.")
 
-# Provide SQLAlchemy URI to models/init_db if necessary
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 
-# --- Folder Configurations ---
+# Local folders only used for dev / temp operations
 UPLOAD_FOLDER = "uploads"
-QR_FOLDER_WEB = 'static/qr_codes'
-GUEST_CARDS_FOLDER = 'static/guest_cards'
-
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['QR_FOLDER_WEB'] = QR_FOLDER_WEB
-app.config['GUEST_CARDS_FOLDER'] = GUEST_CARDS_FOLDER
-
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(QR_FOLDER_WEB, exist_ok=True)
-os.makedirs(GUEST_CARDS_FOLDER, exist_ok=True)
 
-# --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.info(f"Using database: {DATABASE_URL}")
 
-# --- Admin Credentials ---
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "WedSy#01")
 
-# --- Initialize the database using models.py's init_db function ---
 with app.app_context():
     init_db(app)
 
-# Utility function for WhatsApp numbers
-def to_whatsapp_number(phone):
-    phone = str(phone).strip()
-    if phone.startswith('+'):
-        phone = phone[1:]
-    if phone.startswith('0'):
-        phone = phone[1:]
-    # If number is 9 digits starting with '7' -> Tanzanian local
-    if phone.startswith('7') and len(phone) == 9:
-        return f"255{phone}"
-    return phone
+# ---------------------------------------------------------------------------
+# Supabase Storage Helpers
+# ---------------------------------------------------------------------------
 
-# Jinja globals
-app.jinja_env.globals.update(to_whatsapp_number=to_whatsapp_number, url_encode=url_encode)
+def upload_to_supabase(bucket: str, filename: str, data: bytes, content_type: str = "image/png") -> str:
+    """
+    Upload bytes to a Supabase Storage bucket.
+    Returns the public URL of the uploaded file.
+    Overwrites if file already exists (upsert=True).
+    """
+    if not supabase:
+        raise RuntimeError("Supabase client not initialized. Check SUPABASE_URL and SUPABASE_SERVICE_KEY.")
 
-# --- Decorators ---
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not session.get('logged_in'):
-            flash('Please log in first.', 'warning')
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
+    supabase.storage.from_(bucket).upload(
+        path=filename,
+        file=data,
+        file_options={"content-type": content_type, "upsert": "true"},
+    )
+    public_url = supabase.storage.from_(bucket).get_public_url(filename)
+    return public_url
 
-# --- Helper Functions ---
-def get_safe_filename_name_part(name):
-    safe_name = (name or "").upper()
-    sanitized = "".join(c if c.isalnum() else '_' for c in safe_name)
-    return sanitized
 
-def generate_qr_code(data, filename):
+def delete_from_supabase(bucket: str, filename: str):
+    """Delete a file from a Supabase Storage bucket. Silently ignores missing files."""
+    if not supabase:
+        return
+    try:
+        supabase.storage.from_(bucket).remove([filename])
+    except Exception as e:
+        logging.warning(f"Could not delete {filename} from {bucket}: {e}")
+
+
+def download_from_supabase(bucket: str, filename: str) -> bytes:
+    """Download a file from Supabase Storage and return its bytes."""
+    if not supabase:
+        raise RuntimeError("Supabase client not initialized.")
+    return supabase.storage.from_(bucket).download(filename)
+
+
+def qr_filename_from_guest(guest) -> str:
+    sanitized = get_safe_filename_name_part(guest.name or "GUEST")
+    return f"{guest.qr_code_id}-{sanitized}.png"
+
+
+def card_filename_from_guest(guest) -> str:
+    sanitized = get_safe_filename_name_part(guest.name or "GUEST")
+    return f"GUEST-{guest.visual_id:04d}-{sanitized}.png"
+
+
+# ---------------------------------------------------------------------------
+# QR Code Generation
+# ---------------------------------------------------------------------------
+
+def generate_qr_bytes(data: str) -> bytes:
+    """Generate a QR code and return it as PNG bytes (no disk write)."""
     qr = qrcode.QRCode(
         version=1,
         error_correction=qrcode.constants.ERROR_CORRECT_H,
@@ -131,37 +166,48 @@ def generate_qr_code(data, filename):
     qr.add_data(data)
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
-    img.save(filename)
-    return filename
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
+
+def to_whatsapp_number(phone):
+    phone = str(phone).strip()
+    if phone.startswith('+'):
+        phone = phone[1:]
+    if phone.startswith('0'):
+        phone = phone[1:]
+    if phone.startswith('7') and len(phone) == 9:
+        return f"255{phone}"
+    return phone
+
+
+app.jinja_env.globals.update(to_whatsapp_number=to_whatsapp_number, url_encode=url_encode)
+
+
+def get_safe_filename_name_part(name):
+    safe_name = (name or "").upper()
+    return "".join(c if c.isalnum() else '_' for c in safe_name)
+
 
 def normalize_card_type(card_type_input, allowed_input=None):
-    """
-    Determines card_type and allowed based on the rules:
-    - S → single (1)
-    - D → double (2)
-    - If allowed < 2 → single
-    - If allowed = 2 → double
-    - If allowed >= 3 → family
-    """
-
-    # Normalize shortcuts
     if card_type_input:
         card_type = card_type_input.strip().lower()
-
         if card_type == "s":
             return "single", 1
         if card_type == "d":
             return "double", 2
         if card_type == "family":
-            # Family MUST have allowed >= 3
             if allowed_input and int(allowed_input) >= 3:
                 return "family", int(allowed_input)
-            # If allowed missing or too small → downgrade
             if allowed_input and int(allowed_input) == 2:
                 return "double", 2
             return "single", 1
 
-    # If card type not given, infer from allowed
     if allowed_input:
         allowed = int(allowed_input)
         if allowed < 2:
@@ -170,33 +216,45 @@ def normalize_card_type(card_type_input, allowed_input=None):
             return "double", 2
         return "family", allowed
 
-    # Fallback default
     return "single", 1
 
 
-def get_next_visual_id(session):
-    """Return next visual_id integer (use provided session)."""
-    # session must be an open SQLAlchemy session
-    max_id = session.query(func.max(Guest.visual_id)).scalar()
-    if max_id is None:
-        return 1
-    return int(max_id) + 1
+def get_next_visual_id(db_session):
+    max_id = db_session.query(func.max(Guest.visual_id)).scalar()
+    return 1 if max_id is None else int(max_id) + 1
 
 
-# --- Routes ---
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('logged_in'):
+            flash('Please log in first.', 'warning')
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
 @app.route('/')
 @login_required
 def view_all():
-    with get_db_session() as session:
-        guests = session.query(Guest).order_by(Guest.visual_id).all()
-        # Assign missing visual_id
-        missing_id_guests = [g for g in guests if g.visual_id is None]
-        for g in missing_id_guests:
-            g.visual_id = get_next_visual_id(session)
-            session.add(g)
-        if missing_id_guests:
-            session.commit()
+    with get_db_session() as db:
+        guests = db.query(Guest).order_by(Guest.visual_id).all()
+        missing = [g for g in guests if g.visual_id is None]
+        for g in missing:
+            g.visual_id = get_next_visual_id(db)
+            db.add(g)
+        if missing:
+            db.commit()
         return render_template('guests.html', guests=guests, current_environment=flask_env)
+
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -205,9 +263,9 @@ def login():
             session['logged_in'] = True
             flash('Login successful.', 'success')
             return redirect(url_for('view_all'))
-        else:
-            flash('Invalid credentials.', 'danger')
+        flash('Invalid credentials.', 'danger')
     return render_template('login.html')
+
 
 @app.route('/logout')
 @login_required
@@ -216,7 +274,8 @@ def logout():
     flash('Logged out.', 'info')
     return redirect(url_for('login'))
 
-# -------------------- add_guest route --------------------
+
+# -------------------- add_guest --------------------
 @app.route('/add_guest', methods=['GET', 'POST'])
 @login_required
 def add_guest():
@@ -227,48 +286,39 @@ def add_guest():
         group_size_input = request.form.get('group_size', '').strip()
 
         card_type, default_size = normalize_card_type(card_type_input, group_size_input)
+        group_size = int(group_size_input) if (card_type == 'family' and group_size_input.isdigit()) else default_size
 
-        # If family and group_size numeric provided, use it
-        if card_type == 'family' and group_size_input.isdigit():
-            group_size = int(group_size_input)
-        else:
-            group_size = default_size
-
-        with get_db_session() as session:
-            # Skip duplicates by phone (option 1)
-            existing = session.query(Guest).filter_by(phone=phone).first()
-            if existing:
-                flash(f"Guest with phone {phone} already exists. Skipping duplicate.", "warning")
+        with get_db_session() as db:
+            if db.query(Guest).filter_by(phone=phone).first():
+                flash(f"Guest with phone {phone} already exists.", "warning")
                 return redirect(url_for('add_guest'))
 
-            visual_id = get_next_visual_id(session)
+            visual_id = get_next_visual_id(db)
             qr_id = f"GUEST-{visual_id:04d}"
-            sanitized_name = get_safe_filename_name_part(name or "GUEST")
-            qr_file_path = os.path.join(app.config['QR_FOLDER_WEB'], f"{qr_id}-{sanitized_name}.png")
+
+            # Generate QR and upload to Supabase
             try:
-                generate_qr_code(qr_id, qr_file_path)
+                qr_bytes = generate_qr_bytes(qr_id)
+                qr_fname = f"{qr_id}-{get_safe_filename_name_part(name or 'GUEST')}.png"
+                qr_url = upload_to_supabase(QR_BUCKET, qr_fname, qr_bytes)
             except Exception as e:
-                current_app.logger.warning(f"Could not create QR image: {e}")
+                current_app.logger.warning(f"QR upload failed: {e}")
+                qr_url = ""
 
             guest = Guest(
-                name=name,
-                phone=phone,
-                qr_code_id=qr_id,
-                qr_code_url=f"/static/qr_codes/{qr_id}-{sanitized_name}.png",
-                visual_id=visual_id,
-                card_type=card_type,
-                group_size=group_size,
-                checked_in_count=0
+                name=name, phone=phone, qr_code_id=qr_id,
+                qr_code_url=qr_url, visual_id=visual_id,
+                card_type=card_type, group_size=group_size, checked_in_count=0
             )
-            session.add(guest)
-            session.commit()
-            flash(f"Guest '{name or phone}' added. Card type: {card_type.title()}, allowed entries: {group_size}.", "success")
+            db.add(guest)
+            db.commit()
+            flash(f"Guest '{name or phone}' added. Card: {card_type.title()}, entries: {group_size}.", "success")
             return redirect(url_for('view_all'))
 
-    # GET
     return render_template('add_guest.html')
 
-# -------------------- upload_csv route --------------------
+
+# -------------------- upload_csv --------------------
 @app.route('/upload_csv', methods=['GET', 'POST'])
 @login_required
 def upload_csv():
@@ -280,154 +330,111 @@ def upload_csv():
 
         stream = StringIO(file.stream.read().decode("utf-8"))
         reader = csv.DictReader(stream)
-        added = 0
-        skipped = 0
+        added = skipped = 0
 
         def get_row(row, *keys):
-            """
-            Safely try multiple column names in different cases.
-            """
             for k in keys:
                 v = row.get(k) or row.get(k.lower()) or row.get(k.capitalize())
                 if v:
                     return v.strip()
             return ""
 
-        with get_db_session() as session:
-            for row in reader:
+        def normalize(raw):
+            raw = (raw or "").strip().lower()
+            if raw in ["s", "single"]: return "single"
+            if raw in ["d", "double"]: return "double"
+            if raw in ["f", "family", "group"]: return "family"
+            return "single"
 
-                # --------- Read Basic Fields ----------
+        with get_db_session() as db:
+            for row in reader:
                 name = get_row(row, "name", "Name")
                 phone = get_row(row, "phone", "Phone")
-
                 if not phone:
                     skipped += 1
                     continue
 
-                # --------- Normalize Card Type ----------
-                raw_type = get_row(row, "Card Type", "card_type", "type")
+                card_type = normalize(get_row(row, "Card Type", "card_type", "type"))
 
-                def normalize(raw):
-                    raw = (raw or "").strip().lower()
-                    if raw in ["s", "single"]:
-                        return "single"
-                    if raw in ["d", "double"]:
-                        return "double"
-                    if raw in ["f", "family", "group"]:
-                        return "family"
-                    return "single"  # default
-
-                card_type = normalize(raw_type)
-
-                # --------- Determine Group Size ----------
                 if card_type == "single":
                     group_size = 1
-
                 elif card_type == "double":
                     group_size = 2
-
-                else:  # family card
-                    allowed_raw = get_row(row, "Allowed", "allowed", "Size", "size", "Group Size", "group_size")
+                else:
                     try:
-                        group_size = max(1, int(allowed_raw))
+                        group_size = max(1, int(get_row(row, "Allowed", "allowed", "Size", "size", "Group Size", "group_size")))
                     except:
                         group_size = 1
 
-                # --------- Prevent Duplicate Guests ----------
-                existing = session.query(Guest).filter_by(phone=phone).first()
-                if existing:
+                if db.query(Guest).filter_by(phone=phone).first():
                     skipped += 1
                     continue
 
-                # --------- Assign Unique Visual ID ----------
-                visual_id = get_next_visual_id(session)
+                visual_id = get_next_visual_id(db)
                 qr_id = f"GUEST-{visual_id:04d}"
+                qr_fname = f"{qr_id}-{get_safe_filename_name_part(name or 'GUEST')}.png"
 
-                sanitized_name = get_safe_filename_name_part(name or "GUEST")
-                qr_file_path = os.path.join(
-                    app.config['QR_FOLDER_WEB'],
-                    f"{qr_id}-{sanitized_name}.png"
-                )
-
-                # --------- Generate QR Code ----------
                 try:
-                    generate_qr_code(qr_id, qr_file_path)
+                    qr_bytes = generate_qr_bytes(qr_id)
+                    qr_url = upload_to_supabase(QR_BUCKET, qr_fname, qr_bytes)
                 except Exception as e:
-                    current_app.logger.warning(f"QR generation failed for {name}: {e}")
+                    current_app.logger.warning(f"QR upload failed for {name}: {e}")
+                    qr_url = ""
 
-                # --------- Create Guest ----------
-                guest = Guest(
-                    name=name,
-                    phone=phone,
-                    qr_code_id=qr_id,
-                    qr_code_url=f"/static/qr_codes/{qr_id}-{sanitized_name}.png",
-                    visual_id=visual_id,
-                    card_type=card_type,
-                    group_size=group_size,
-                    checked_in_count=0
-                )
-
-                session.add(guest)
-                session.flush()  # Helps with next visual_id
+                db.add(Guest(
+                    name=name, phone=phone, qr_code_id=qr_id,
+                    qr_code_url=qr_url, visual_id=visual_id,
+                    card_type=card_type, group_size=group_size, checked_in_count=0
+                ))
+                db.flush()
                 added += 1
 
-            session.commit()
+            db.commit()
 
-        flash(f"CSV Processed — Added: {added}, Skipped (duplicates/missing phone): {skipped}", "success")
+        flash(f"CSV processed — Added: {added}, Skipped: {skipped}", "success")
         return redirect(url_for('view_all'))
 
     return render_template('upload_csv.html')
 
-# -------------------- update_status route --------------------
+
+# -------------------- update_status --------------------
 @app.route('/update_status', methods=['POST'])
 @login_required
 def update_status():
     data = request.get_json() or {}
     qr_code_id = data.get("qr_code_id")
-
     if not qr_code_id:
         return jsonify(success=False, message="Missing qr_code_id.")
 
-    with get_db_session() as session:
+    with get_db_session() as db:
         try:
-            guest = session.query(Guest).filter_by(qr_code_id=qr_code_id).first()
+            guest = db.query(Guest).filter_by(qr_code_id=qr_code_id).first()
             if not guest:
                 return jsonify(success=False, message="Guest not found.")
 
             remaining = guest.group_size - guest.checked_in_count
-
             if remaining <= 0:
-                # nothing left
-                guest_details = {
-                    "visual_id": guest.visual_id,
-                    "name": guest.name,
-                    "card_type": (guest.card_type or "").title(),
-                    "remaining_entries": 0
-                }
-                return jsonify(success=False, already_entered=True, message="All allowed entries for this card have already checked in.", guest=guest_details)
+                return jsonify(
+                    success=False, already_entered=True,
+                    message="All allowed entries have already checked in.",
+                    guest={"visual_id": guest.visual_id, "name": guest.name,
+                           "card_type": (guest.card_type or "").title(), "remaining_entries": 0}
+                )
 
-            # increment checked_in_count by 1 (one person entering)
             guest.checked_in_count = (guest.checked_in_count or 0) + 1
-
-            # if we've used up all entries, set has_entered + entry_time
             if guest.checked_in_count >= guest.group_size:
                 guest.has_entered = True
                 guest.entry_time = datetime.now()
 
-            session.commit()
-
-            remaining_after = guest.group_size - guest.checked_in_count
-            guest_details = {
-                "visual_id": guest.visual_id,
-                "name": guest.name,
-                "card_type": (guest.card_type or "").title(),
-                "remaining_entries": remaining_after
-            }
-
-            return jsonify(success=True, message="Check-in successful.", guest=guest_details)
-
+            db.commit()
+            return jsonify(
+                success=True, message="Check-in successful.",
+                guest={"visual_id": guest.visual_id, "name": guest.name,
+                       "card_type": (guest.card_type or "").title(),
+                       "remaining_entries": guest.group_size - guest.checked_in_count}
+            )
         except Exception as e:
-            session.rollback()
+            db.rollback()
             current_app.logger.exception(f"Error updating status for {qr_code_id}: {e}")
             return jsonify(success=False, message=f"An error occurred: {e}")
 
@@ -436,68 +443,49 @@ def update_status():
 @login_required
 def search_guests():
     query = request.args.get('q', '').strip()
-    with get_db_session() as session:
+    with get_db_session() as db:
         if query:
-            guests = session.query(Guest).filter(
+            guests = db.query(Guest).filter(
                 (Guest.name.ilike(f'%{query}%')) | (Guest.phone.ilike(f'%{query}%'))
             ).order_by(Guest.visual_id).all()
         else:
-            guests = session.query(Guest).order_by(Guest.visual_id).all()
+            guests = db.query(Guest).order_by(Guest.visual_id).all()
 
-        # Convert to JSON-friendly dict
-        guests_list = []
-        for g in guests:
-            guests_list.append({
-                "visual_id": g.visual_id,
-                "name": g.name,
-                "phone": g.phone,
-                "qr_code_url": g.qr_code_url,
-                "has_entered": g.has_entered,
-                "entry_time": g.entry_time.strftime('%Y-%m-%d %H:%M:%S') if g.entry_time else 'N/A',
-                "card_type": g.card_type
-            })
-    return jsonify(guests_list)
+        return jsonify([{
+            "visual_id": g.visual_id, "name": g.name, "phone": g.phone,
+            "qr_code_url": g.qr_code_url, "has_entered": g.has_entered,
+            "entry_time": g.entry_time.strftime('%Y-%m-%d %H:%M:%S') if g.entry_time else 'N/A',
+            "card_type": g.card_type
+        } for g in guests])
 
 
+# -------------------- download_excel --------------------
 @app.route('/download_excel')
 @login_required
 def download_excel():
-    with get_db_session() as session:
-        guests = session.query(Guest).all()
+    with get_db_session() as db:
+        guests = db.query(Guest).all()
 
-        # --- Normalize safely ---
-        def ct(g): 
-            return (g.card_type or "").strip().lower()
+        def ct(g): return (g.card_type or "").strip().lower()
 
         total_guests = len(guests)
         single_cards = sum(1 for g in guests if ct(g) == "single")
         double_cards = sum(1 for g in guests if ct(g) == "double")
         family_cards = sum(1 for g in guests if ct(g) == "family")
-
-        # Sum of allowed = sum(group_size for family cards)
         total_family_allowed = sum(g.group_size for g in guests if ct(g) == "family")
-
         entered_guests = sum(1 for g in guests if bool(g.has_entered))
-        not_entered_guests = total_guests - entered_guests
 
-        # --- Create Workbook ---
         wb = Workbook()
         ws = wb.active
         ws.title = "Guest Report"
-
-        # --- Title ---
         ws["A1"] = "Guest Summary Report"
         ws["A1"].font = Font(size=14, bold=True)
 
-        # --- Summary Section (Top) ---
         summary_data = [
-            ("Total Guests", total_guests),
-            ("Single Cards", single_cards),
-            ("Double Cards", double_cards),
-            ("Family Cards", family_cards),
+            ("Total Guests", total_guests), ("Single Cards", single_cards),
+            ("Double Cards", double_cards), ("Family Cards", family_cards),
             ("Total Allowed by Family Cards", total_family_allowed),
-            ("Guests Entered", entered_guests),
-            ("Guests Not Entered", not_entered_guests),
+            ("Guests Entered", entered_guests), ("Guests Not Entered", total_guests - entered_guests),
         ]
 
         row = 3
@@ -507,160 +495,113 @@ def download_excel():
             ws[f"A{row}"].font = Font(bold=True)
             row += 1
 
-        # --- Table Header ---
         table_start = row + 1
-        headers = [
-            "ID", "Name", "Phone", "QR Code ID",
-            "Has Entered", "Entry Time",
-            "Visual ID", "Card Type", "Group Size"
-        ]
-
+        headers = ["ID", "Name", "Phone", "QR Code ID", "Has Entered", "Entry Time", "Visual ID", "Card Type", "Group Size"]
         for col, header in enumerate(headers, start=1):
-            cell = ws.cell(row=table_start, column=col, value=header)
-            cell.font = Font(bold=True)
+            ws.cell(row=table_start, column=col, value=header).font = Font(bold=True)
 
-        # --- Table Rows ---
         for i, g in enumerate(guests, start=table_start + 1):
-            ws.cell(i, 1, g.id)
-            ws.cell(i, 2, g.name)
-            ws.cell(i, 3, g.phone)
+            ws.cell(i, 1, g.id); ws.cell(i, 2, g.name); ws.cell(i, 3, g.phone)
             ws.cell(i, 4, g.qr_code_id)
             ws.cell(i, 5, "Entered" if g.has_entered else "Not Entered")
             ws.cell(i, 6, g.entry_time.strftime('%Y-%m-%d %H:%M:%S') if g.entry_time else "")
-            ws.cell(i, 7, g.visual_id)
-            ws.cell(i, 8, g.card_type)
-            ws.cell(i, 9, g.group_size)  # <-- ADDED
+            ws.cell(i, 7, g.visual_id); ws.cell(i, 8, g.card_type); ws.cell(i, 9, g.group_size)
 
-        # --- Conditional Formatting for Entered (Column E) ---
         first_data_row = table_start + 1
         last_data_row = table_start + len(guests)
-
         if last_data_row >= first_data_row:
-            entered_range = f"E{first_data_row}:E{last_data_row}"
+            rng = f"E{first_data_row}:E{last_data_row}"
+            ws.conditional_formatting.add(rng, CellIsRule(operator="equal", formula=['"Entered"'],
+                fill=PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")))
+            ws.conditional_formatting.add(rng, CellIsRule(operator="equal", formula=['"Not Entered"'],
+                fill=PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")))
 
-            ws.conditional_formatting.add(
-                entered_range,
-                CellIsRule(
-                    operator="equal",
-                    formula=['"Entered"'],
-                    fill=PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-                )
-            )
-
-            ws.conditional_formatting.add(
-                entered_range,
-                CellIsRule(
-                    operator="equal",
-                    formula=['"Not Entered"'],
-                    fill=PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-                )
-            )
-
-        # --- Auto Column Width ---
         for column in ws.columns:
-            max_length = 0
-            col_letter = column[0].column_letter
-            for cell in column:
-                if cell.value is not None:
-                    max_length = max(max_length, len(str(cell.value)))
-            ws.column_dimensions[col_letter].width = max_length + 2
+            max_length = max((len(str(cell.value)) for cell in column if cell.value), default=0)
+            ws.column_dimensions[column[0].column_letter].width = max_length + 2
 
-        # --- Output file ---
         output = BytesIO()
         wb.save(output)
         output.seek(0)
-
-        return send_file(
-            output,
-            as_attachment=True,
-            download_name="guest_report.xlsx",
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        return send_file(output, as_attachment=True, download_name="guest_report.xlsx",
+                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
+# -------------------- zip_qr_codes_web --------------------
 @app.route('/zip_qr_codes_web')
 @login_required
 def zip_qr_codes_web():
+    """Download all QR codes as a zip by streaming them from Supabase."""
+    with get_db_session() as db:
+        guests = db.query(Guest).all()
+
     memory_file = BytesIO()
     with zipfile.ZipFile(memory_file, 'w') as zf:
-        qr_folder = current_app.config.get('QR_FOLDER_WEB', QR_FOLDER_WEB)
-        for filename in os.listdir(qr_folder):
-            path = os.path.join(qr_folder, filename)
-            if os.path.isfile(path):
-                zf.write(path, filename)
+        for guest in guests:
+            if not guest.qr_code_url:
+                continue
+            try:
+                fname = qr_filename_from_guest(guest)
+                data = download_from_supabase(QR_BUCKET, fname)
+                zf.writestr(fname, data)
+            except Exception as e:
+                current_app.logger.warning(f"Could not fetch QR for {guest.name}: {e}")
+
     memory_file.seek(0)
     return send_file(memory_file, download_name='qr_codes.zip', as_attachment=True, mimetype='application/zip')
 
+
+# -------------------- edit_guest --------------------
 @app.route('/edit_guest/<int:guest_id>', methods=['GET', 'POST'])
 @login_required
 def edit_guest(guest_id):
-    with get_db_session() as session:
+    with get_db_session() as db:
         try:
-            guest = session.get(Guest, guest_id)
+            guest = db.get(Guest, guest_id)
             if not guest:
                 flash("Guest not found.", "danger")
                 return redirect(url_for('view_all'))
 
             if request.method == 'POST':
-                # Update basic fields
                 guest.name = request.form.get('name', guest.name).strip()
                 guest.phone = to_whatsapp_number(request.form.get('phone', guest.phone))
                 guest.has_entered = 'has_entered' in request.form
 
-                # Normalize card type (single/double/family)
                 new_card_type_raw = request.form.get('card_type', guest.card_type)
-                new_card_type = normalize_card_type(new_card_type_raw)
+                new_card_type, _ = normalize_card_type(new_card_type_raw)
 
-                # --- FAMILY CARD HANDLING ---
                 if new_card_type == "family":
-                    size_raw = request.form.get('group_size', '').strip()
-
-                    # Validate group size
                     try:
-                        new_group_size = max(1, int(size_raw))
+                        new_group_size = max(1, int(request.form.get('group_size', '').strip()))
                     except:
                         flash("Invalid group size for family card.", "danger")
                         return redirect(request.url)
-
-                    # Cannot set group size less than people already checked in
                     if new_group_size < guest.checked_in_count:
-                        flash(
-                            f"Group size cannot be less than the number already checked in ({guest.checked_in_count}).",
-                            "danger"
-                        )
+                        flash(f"Group size cannot be less than checked-in count ({guest.checked_in_count}).", "danger")
                         return redirect(request.url)
-
-                # --- SINGLE & DOUBLE AUTOMATIC GROUP SIZE ---
                 elif new_card_type == "single":
                     new_group_size = 1
-
                     if guest.checked_in_count > 1:
-                        flash("Guest already used more scans than allowed for a single card.", "danger")
+                        flash("Guest already used more scans than a single card allows.", "danger")
                         return redirect(request.url)
-
                 elif new_card_type == "double":
                     new_group_size = 2
-
                     if guest.checked_in_count > 2:
-                        flash("Guest already used more scans than allowed for a double card.", "danger")
+                        flash("Guest already used more scans than a double card allows.", "danger")
                         return redirect(request.url)
-
                 else:
                     flash("Unknown card type.", "danger")
                     return redirect(request.url)
 
-                # Apply updated card type + group size
                 guest.card_type = new_card_type
                 guest.group_size = new_group_size
-
-                session.commit()
+                db.commit()
                 flash('Guest updated successfully.', 'success')
                 return redirect(url_for('view_all'))
 
             return render_template('edit_guest.html', guest=guest)
-
         except Exception as e:
-            session.rollback()
+            db.rollback()
             flash(f'Error updating guest: {e}', 'danger')
             current_app.logger.error(f"Error updating guest {guest_id}: {e}", exc_info=True)
             return redirect(url_for('view_all'))
@@ -671,68 +612,61 @@ def edit_guest(guest_id):
 def scan_qr():
     return render_template('scan_qr.html')
 
+
+# -------------------- delete_guest --------------------
 @app.route('/delete_guest/<int:guest_id>', methods=['GET'])
 @login_required
 def delete_guest(guest_id):
-    with get_db_session() as session:
+    with get_db_session() as db:
         try:
-            guest = session.get(Guest, guest_id)
+            guest = db.get(Guest, guest_id)
             if not guest:
                 flash("Guest not found.", "danger")
                 return redirect(url_for('view_all'))
 
-            if guest.qr_code_url:
-                qr_file_relative_path = guest.qr_code_url.lstrip('/')
-                qr_file_abs_path = os.path.join(current_app.root_path, qr_file_relative_path)
-                if os.path.exists(qr_file_abs_path):
-                    os.remove(qr_file_abs_path)
-                    current_app.logger.info(f"Deleted QR file: {qr_file_abs_path}")
-                else:
-                    current_app.logger.warning(f"QR file not found for deletion: {qr_file_abs_path}")
+            # Delete QR from Supabase
+            delete_from_supabase(QR_BUCKET, qr_filename_from_guest(guest))
+            # Delete card from Supabase
+            delete_from_supabase(CARDS_BUCKET, card_filename_from_guest(guest))
 
-            sanitized_name = get_safe_filename_name_part(guest.name)
-            guest_card_filename = f"GUEST-{guest.visual_id:04d}-{sanitized_name}.png"
-            guest_card_path = os.path.join(current_app.config['GUEST_CARDS_FOLDER'], guest_card_filename)
-            if os.path.exists(guest_card_path):
-                os.remove(guest_card_path)
-                current_app.logger.info(f"Deleted guest card: {guest_card_path}")
-            else:
-                current_app.logger.warning(f"Guest card not found for deletion: {guest_card_path}")
-
-            session.delete(guest)
-            session.commit()
+            db.delete(guest)
+            db.commit()
             flash('Guest and associated files deleted.', 'success')
-            return redirect(url_for('view_all'))
         except Exception as e:
-            session.rollback()
+            db.rollback()
             flash(f'Error deleting guest: {e}', 'danger')
             current_app.logger.error(f"Error deleting guest {guest_id}: {e}", exc_info=True)
-            return redirect(url_for('view_all'))
 
+    return redirect(url_for('view_all'))
+
+
+# -------------------- regenerate_qr_codes --------------------
 @app.route('/regenerate_qr_codes')
 @login_required
 def regenerate_qr_codes():
-    with get_db_session() as session:
+    with get_db_session() as db:
         try:
-            guests = session.query(Guest).all()
-            qr_folder = current_app.config.get('QR_FOLDER_WEB', QR_FOLDER_WEB)
+            guests = db.query(Guest).all()
             for guest in guests:
                 if guest.visual_id is None:
-                    guest.visual_id = get_next_visual_id(session)
-                qr_code_id = f"GUEST-{guest.visual_id:04d}"
-                sanitized_name = get_safe_filename_name_part(guest.name)
-                qr_file_path = os.path.join(qr_folder, f"{qr_code_id}-{sanitized_name}.png")
-                generate_qr_code(qr_code_id, qr_file_path)
-                guest.qr_code_id = qr_code_id
-                guest.qr_code_url = f"/{os.path.join(qr_folder, f'{qr_code_id}-{sanitized_name}.png')}"
-            session.commit()
+                    guest.visual_id = get_next_visual_id(db)
+                qr_id = f"GUEST-{guest.visual_id:04d}"
+                qr_fname = qr_filename_from_guest(guest)
+                qr_bytes = generate_qr_bytes(qr_id)
+                qr_url = upload_to_supabase(QR_BUCKET, qr_fname, qr_bytes)
+                guest.qr_code_id = qr_id
+                guest.qr_code_url = qr_url
+            db.commit()
             flash("QR codes regenerated.", "success")
         except Exception as e:
-            session.rollback()
+            db.rollback()
             flash(f"Error regenerating QR codes: {e}", "danger")
             current_app.logger.error(f"Error regenerating QR codes: {e}", exc_info=True)
+
     return redirect(url_for('view_all'))
 
+
+# -------------------- generate_guest_cards --------------------
 @app.route('/generate_guest_cards')
 @login_required
 def generate_guest_cards():
@@ -740,208 +674,185 @@ def generate_guest_cards():
     NAME_CENTER_Y = 550
     NAME_X = 550
     QR_SIZE = 175
-    QR_MARGIN_BOTTOM = 180
-    QR_Y = CARD_H - QR_SIZE - QR_MARGIN_BOTTOM
+    QR_Y = CARD_H - QR_SIZE - 180
     QR_X = 750
-    CARD_TYPE_MARGIN = 45
-    CARD_TYPE_Y = CARD_H - CARD_TYPE_MARGIN - 355
+    CARD_TYPE_Y = CARD_H - 45 - 355
     CARD_TYPE_X = 770
     VISUAL_ID_FONT_SIZE = 35
     VISUAL_ID_MARGIN_BOTTOM = 75
     VISUAL_ID_MARGIN_RIGHT = 25
 
-    with get_db_session() as session:
-        try:
-            template_path = os.path.join("static", "Card Template.jpg")
-            output_folder = current_app.config['GUEST_CARDS_FOLDER']
+    template_path = os.path.join("static", "Card Template.jpg")
+    font_path = os.path.join("static", "fonts", "Roboto-Bold.ttf")
 
-            if not os.path.exists(template_path):
-                raise FileNotFoundError(f"Card template not found at: {template_path}.")
+    if not os.path.exists(template_path):
+        flash("Card template not found at static/Card Template.jpg", "danger")
+        return redirect(url_for('view_all'))
+    if not os.path.exists(font_path):
+        flash("Font file not found at static/fonts/Roboto-Bold.ttf", "danger")
+        return redirect(url_for('view_all'))
 
-            for file in os.listdir(output_folder):
-                file_path = os.path.join(output_folder, file)
-                try:
-                    if os.path.isfile(file_path):
-                        os.unlink(file_path)
-                except Exception as e:
-                    flash(f"Could not delete old card {file}: {e}", "warning")
-                    current_app.logger.warning(f"Failed to delete old card {file}: {e}")
+    name_font = ImageFont.truetype(font_path, 50)
+    card_type_font = ImageFont.truetype(font_path, 35)
+    visual_id_font = ImageFont.truetype(font_path, VISUAL_ID_FONT_SIZE)
 
-            guests = session.query(Guest).all()
+    with get_db_session() as db:
+        guests = db.query(Guest).all()
 
-            font_path = os.path.join("static", "fonts", "Roboto-Bold.ttf")
-            if not os.path.exists(font_path):
-                raise FileNotFoundError(f"Font file not found at: {font_path}.")
-
-            name_font = ImageFont.truetype(font_path, 50)
-            card_type_font = ImageFont.truetype(font_path, 35)
-            visual_id_font = ImageFont.truetype(font_path, VISUAL_ID_FONT_SIZE)
-
-            for guest in guests:
-                try:
-                    img = Image.open(template_path).convert("RGB")
-                    draw = ImageDraw.Draw(img)
-
-                    if not guest.qr_code_url:
-                        flash(f"No QR URL for guest {guest.name}. Skipping.", "warning")
-                        current_app.logger.warning(f"No qr_code_url for guest {guest.name}.")
-                        continue
-
-                    qr_file_relative_path = guest.qr_code_url.lstrip('/')
-                    qr_file_abs_path = os.path.join(current_app.root_path, qr_file_relative_path)
-                    if not os.path.exists(qr_file_abs_path):
-                        flash(f"QR code file not found for guest {guest.name} (ID: {guest.visual_id}). Card generation skipped.", "warning")
-                        current_app.logger.warning(f"QR code file not found for guest {guest.name}: {qr_file_abs_path}.")
-                        continue
-
-                    qr_img = Image.open(qr_file_abs_path).resize((QR_SIZE, QR_SIZE))
-                    wrapped_name = textwrap.fill((guest.name or "").upper(), width=20)
-                    lines = wrapped_name.split('\n')
-
-                    line_height_estimate = name_font.getbbox("A")[3] + 10
-                    total_text_height = line_height_estimate * len(lines)
-                    name_y_start = NAME_CENTER_Y - total_text_height // 2
-
-                    for i, line in enumerate(lines):
-                        x = NAME_X
-                        y = name_y_start + i * line_height_estimate
-                        draw.text((x, y), line, font=name_font, fill="#000000")
-
-                    qr_x = QR_X
-                    img.paste(qr_img, (qr_x, QR_Y))
-
-                    card_type_text = (guest.card_type or "").upper()
-                    draw.text((CARD_TYPE_X, CARD_TYPE_Y), card_type_text, font=card_type_font, fill="#CC3332")
-
-                    visual_id_text = f"NO. {guest.visual_id:04d}"
-                    text_bbox = draw.textbbox((0, 0), visual_id_text, font=visual_id_font)
-                    text_width = text_bbox[2] - text_bbox[0]
-                    text_height = text_bbox[3] - text_bbox[1]
-                    visual_id_x = CARD_W - text_width - VISUAL_ID_MARGIN_RIGHT
-                    visual_id_y = CARD_H - text_height - VISUAL_ID_MARGIN_BOTTOM
-                    draw.text((visual_id_x, visual_id_y), visual_id_text, font=visual_id_font, fill="#CC3332")
-
-                    sanitized_name_part = get_safe_filename_name_part(guest.name)
-                    sanitized_filename = f"GUEST-{guest.visual_id:04d}-{sanitized_name_part}.png"
-                    img.save(os.path.join(output_folder, sanitized_filename))
-
-                except Exception as loop_e:
-                    flash(f"Failed to generate card for {guest.name} (ID: {guest.visual_id}). Error: {str(loop_e)}", "danger")
-                    current_app.logger.error(f"Error processing card for guest {guest.visual_id}: {loop_e}", exc_info=True)
+        for guest in guests:
+            try:
+                if not guest.qr_code_url:
+                    flash(f"No QR URL for {guest.name}. Skipping.", "warning")
                     continue
 
-            flash("Guest invitation cards generated successfully.", "success")
+                # Download QR from Supabase
+                qr_data = download_from_supabase(QR_BUCKET, qr_filename_from_guest(guest))
+                qr_img = Image.open(BytesIO(qr_data)).resize((QR_SIZE, QR_SIZE))
 
-        except FileNotFoundError as fnfe:
-            flash(f"Required file not found: {str(fnfe)}", "danger")
-            current_app.logger.error(f"File not found during card generation: {fnfe}", exc_info=True)
-        except Exception as e:
-            flash(f"Error generating cards: {str(e)}", "danger")
-            current_app.logger.error(f"Error generating cards: {e}", exc_info=True)
+                img = Image.open(template_path).convert("RGB")
+                draw = ImageDraw.Draw(img)
 
+                # Name
+                wrapped = textwrap.fill((guest.name or "").upper(), width=20)
+                lines = wrapped.split('\n')
+                line_h = name_font.getbbox("A")[3] + 10
+                start_y = NAME_CENTER_Y - (line_h * len(lines)) // 2
+                for i, line in enumerate(lines):
+                    draw.text((NAME_X, start_y + i * line_h), line, font=name_font, fill="#000000")
+
+                # QR
+                img.paste(qr_img, (QR_X, QR_Y))
+
+                # Card type
+                draw.text((CARD_TYPE_X, CARD_TYPE_Y), (guest.card_type or "").upper(),
+                          font=card_type_font, fill="#CC3332")
+
+                # Visual ID
+                vis_text = f"NO. {guest.visual_id:04d}"
+                box = draw.textbbox((0, 0), vis_text, font=visual_id_font)
+                vis_w = box[2] - box[0]
+                vis_h = box[3] - box[1]
+                draw.text((CARD_W - vis_w - VISUAL_ID_MARGIN_RIGHT, CARD_H - vis_h - VISUAL_ID_MARGIN_BOTTOM),
+                          vis_text, font=visual_id_font, fill="#CC3332")
+
+                # Save to bytes and upload to Supabase
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                card_bytes = buf.getvalue()
+                upload_to_supabase(CARDS_BUCKET, card_filename_from_guest(guest), card_bytes)
+
+            except Exception as e:
+                flash(f"Failed card for {guest.name}: {e}", "danger")
+                current_app.logger.error(f"Card gen error for guest {guest.visual_id}: {e}", exc_info=True)
+
+    flash("Guest invitation cards generated successfully.", "success")
     return redirect(url_for('view_all'))
 
+
+# -------------------- download_card_by_id --------------------
 @app.route('/download_card_by_id/<int:visual_id>')
 @login_required
 def download_card_by_id(visual_id):
-    with get_db_session() as session:
+    with get_db_session() as db:
         try:
-            guest = session.query(Guest).filter_by(visual_id=visual_id).first()
+            guest = db.query(Guest).filter_by(visual_id=visual_id).first()
             if not guest:
                 flash("Guest not found.", "danger")
                 return redirect(url_for('view_all'))
 
             template_path = os.path.join("static", "Card Template.jpg")
             font_path = os.path.join("static", "fonts", "Roboto-Bold.ttf")
-            qr_file_relative = (guest.qr_code_url or "").lstrip('/')
-            qr_file = os.path.join(current_app.root_path, qr_file_relative)
 
             if not os.path.exists(template_path):
                 flash("Card template missing.", "danger")
                 return redirect(url_for('view_all'))
-
             if not os.path.exists(font_path):
                 flash("Font file missing.", "danger")
                 return redirect(url_for('view_all'))
 
-            if not os.path.exists(qr_file):
-                flash(f"QR code missing for {guest.name}.", "danger")
-                return redirect(url_for('view_all'))
+            # Download QR from Supabase
+            qr_data = download_from_supabase(QR_BUCKET, qr_filename_from_guest(guest))
+            qr_img = Image.open(BytesIO(qr_data)).resize((175, 175))
 
             img = Image.open(template_path).convert("RGB")
             draw = ImageDraw.Draw(img)
-            qr_img = Image.open(qr_file).resize((175, 175))
 
+            CARD_W, CARD_H = 1240, 1748
             name_font = ImageFont.truetype(font_path, 50)
             card_type_font = ImageFont.truetype(font_path, 35)
             visual_id_font = ImageFont.truetype(font_path, 35)
 
-            CARD_W, CARD_H = 1240, 1748
             wrapped = textwrap.fill((guest.name or "").upper(), width=20)
             lines = wrapped.split('\n')
             line_h = name_font.getbbox("A")[3] + 10
-            total_h = line_h * len(lines)
-            start_y = 550 - total_h // 2
+            start_y = 550 - (line_h * len(lines)) // 2
             for i, line in enumerate(lines):
                 draw.text((550, start_y + i * line_h), line, font=name_font, fill="#000000")
 
             img.paste(qr_img, (750, CARD_H - 175 - 180))
-            draw.text((770, CARD_H - 45 - 355), (guest.card_type or "").upper(), font=card_type_font, fill="#CC3332")
+            draw.text((770, CARD_H - 45 - 355), (guest.card_type or "").upper(),
+                      font=card_type_font, fill="#CC3332")
 
             vis_text = f"NO. {guest.visual_id:04d}"
-            box = draw.textbbox((0,0), vis_text, font=visual_id_font)
-            vis_w, vis_h = box[2]-box[0], box[3]-box[1]
-            draw.text((CARD_W - vis_w - 25, CARD_H - vis_h - 75), vis_text, font=visual_id_font, fill="#CC3332")
+            box = draw.textbbox((0, 0), vis_text, font=visual_id_font)
+            draw.text((CARD_W - (box[2]-box[0]) - 25, CARD_H - (box[3]-box[1]) - 75),
+                      vis_text, font=visual_id_font, fill="#CC3332")
 
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-            img.save(temp_file.name)
-            temp_file.close()
-
-            return send_file(temp_file.name, as_attachment=True, download_name=f"Guest-{guest.visual_id:04d}.png")
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            buf.seek(0)
+            return send_file(buf, as_attachment=True,
+                             download_name=f"Guest-{guest.visual_id:04d}.png",
+                             mimetype="image/png")
 
         except Exception as e:
             flash(f"Error generating card: {e}", "danger")
-            current_app.logger.error(f"Error downloading regenerated card: {e}", exc_info=True)
+            current_app.logger.error(f"Error downloading card: {e}", exc_info=True)
             return redirect(url_for('view_all'))
 
+
+# -------------------- download_all_cards --------------------
 @app.route('/download_all_cards')
 @login_required
 def download_all_cards():
-    output_folder = current_app.config['GUEST_CARDS_FOLDER']
-    if not os.path.exists(output_folder) or not os.listdir(output_folder):
-        flash("No invitation cards found. Please generate them first.", "warning")
-        return redirect(url_for('view_all'))
+    """Stream all guest cards from Supabase into a zip."""
+    with get_db_session() as db:
+        guests = db.query(Guest).all()
 
     zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        for filename in os.listdir(output_folder):
-            path = os.path.join(output_folder, filename)
-            if os.path.isfile(path):
-                zip_file.write(path, arcname=filename)
+    count = 0
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for guest in guests:
+            try:
+                fname = card_filename_from_guest(guest)
+                data = download_from_supabase(CARDS_BUCKET, fname)
+                zf.writestr(fname, data)
+                count += 1
+            except Exception as e:
+                current_app.logger.warning(f"Could not fetch card for {guest.name}: {e}")
+
+    if count == 0:
+        flash("No invitation cards found. Please generate them first.", "warning")
+        return redirect(url_for('view_all'))
 
     zip_buffer.seek(0)
     return send_file(zip_buffer, download_name="invitation_cards.zip", as_attachment=True)
 
+
+# -------------------- guest_report --------------------
 @app.route('/guest_report_data')
 @login_required
 def guest_report_data():
-    with get_db_session() as session:
-        total_guests = session.query(Guest).count()
-        single_cards = session.query(Guest).filter_by(card_type='single').count()
-        double_cards = session.query(Guest).filter_by(card_type='double').count()
-        family_cards = session.query(Guest).filter_by(card_type='family').count()
-        entered_guests = session.query(Guest).filter_by(has_entered=True).count()
-        not_entered_guests = total_guests - entered_guests
-
-        data = {
-            "total_guests": total_guests,
-            "single_cards": single_cards,
-            "double_cards": double_cards,
-            "family_cards": family_cards,
-            "entered_guests": entered_guests,
-            "not_entered_guests": not_entered_guests
-        }
-        return jsonify(data)
+    with get_db_session() as db:
+        total = db.query(Guest).count()
+        return jsonify({
+            "total_guests": total,
+            "single_cards": db.query(Guest).filter_by(card_type='single').count(),
+            "double_cards": db.query(Guest).filter_by(card_type='double').count(),
+            "family_cards": db.query(Guest).filter_by(card_type='family').count(),
+            "entered_guests": db.query(Guest).filter_by(has_entered=True).count(),
+            "not_entered_guests": total - db.query(Guest).filter_by(has_entered=True).count(),
+        })
 
 
 @app.route('/guest_report')
@@ -949,43 +860,29 @@ def guest_report_data():
 def guest_report():
     return render_template('guest_report.html')
 
+
+# -------------------- clear_all_data --------------------
 @app.route('/clear_all_data', methods=['GET'])
 @login_required
 def clear_all_data():
-    with get_db_session() as session:
+    with get_db_session() as db:
         try:
-            num_deleted_guests = session.query(Guest).delete()
-            session.commit()
-            flash(f"Successfully deleted {num_deleted_guests} guests from the database.", "success")
-            current_app.logger.info(f"Cleared {num_deleted_guests} guests from {DATABASE_URL}")
+            guests = db.query(Guest).all()
 
-            qr_folder = current_app.config['QR_FOLDER_WEB']
-            for filename in os.listdir(qr_folder):
-                file_path = os.path.join(qr_folder, filename)
-                try:
-                    if os.path.isfile(file_path):
-                        os.unlink(file_path)
-                except Exception as e:
-                    current_app.logger.error(f"Error deleting QR file {file_path}: {e}")
-                    flash(f"Error deleting QR file {filename}: {e}", "warning")
+            # Delete all files from Supabase storage
+            for guest in guests:
+                delete_from_supabase(QR_BUCKET, qr_filename_from_guest(guest))
+                delete_from_supabase(CARDS_BUCKET, card_filename_from_guest(guest))
 
-            guest_cards_folder = current_app.config['GUEST_CARDS_FOLDER']
-            for filename in os.listdir(guest_cards_folder):
-                file_path = os.path.join(guest_cards_folder, filename)
-                try:
-                    if os.path.isfile(file_path):
-                        os.unlink(file_path)
-                except Exception as e:
-                    current_app.logger.error(f"Error deleting guest card {file_path}: {e}")
-                    flash(f"Error deleting guest card {filename}: {e}", "warning")
-
-            return redirect(url_for('view_all'))
+            num_deleted = db.query(Guest).delete()
+            db.commit()
+            flash(f"Successfully deleted {num_deleted} guests.", "success")
         except Exception as e:
-            session.rollback()
+            db.rollback()
             flash(f"An error occurred while clearing data: {e}", "danger")
             current_app.logger.error(f"Error clearing all data: {e}", exc_info=True)
-            return redirect(url_for('view_all'))
-        
+
+    return redirect(url_for('view_all'))
 
 
 if __name__ == "__main__":
