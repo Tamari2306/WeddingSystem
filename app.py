@@ -195,26 +195,37 @@ def get_safe_filename_name_part(name):
 
 
 def normalize_card_type(card_type_input, allowed_input=None):
-    if card_type_input:
-        card_type = card_type_input.strip().lower()
-        if card_type == "s":
-            return "single", 1
-        if card_type == "d":
-            return "double", 2
-        if card_type == "family":
-            if allowed_input and int(allowed_input) >= 3:
-                return "family", int(allowed_input)
-            if allowed_input and int(allowed_input) == 2:
-                return "double", 2
-            return "single", 1
+    card_type = (card_type_input or "").strip().lower()
 
+    # Explicit type takes priority
+    if card_type in ("s", "single"):
+        return "single", 1
+    if card_type in ("d", "double"):
+        return "double", 2
+    if card_type in ("f", "family", "group"):
+        # Family needs group size >= 3
+        if allowed_input:
+            try:
+                allowed = int(allowed_input)
+                if allowed >= 3:
+                    return "family", allowed
+                if allowed == 2:
+                    return "double", 2
+            except ValueError:
+                pass
+        return "family", 5  # default family size
+
+    # Infer from allowed_input only if card_type is unrecognised
     if allowed_input:
-        allowed = int(allowed_input)
-        if allowed < 2:
-            return "single", 1
-        if allowed == 2:
-            return "double", 2
-        return "family", allowed
+        try:
+            allowed = int(allowed_input)
+            if allowed <= 1:
+                return "single", 1
+            if allowed == 2:
+                return "double", 2
+            return "family", allowed
+        except ValueError:
+            pass
 
     return "single", 1
 
