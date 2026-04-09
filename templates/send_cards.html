@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="container py-4">
+
+  <h2 class="mb-1">Send Invitation Cards</h2>
+  <p class="text-muted mb-4">Send each guest their personalised card via WhatsApp.</p>
+
+  <!-- Summary Cards -->
+  <div class="row mb-4">
+    <div class="col-6 col-md-3 mb-3">
+      <div class="card text-center shadow-sm">
+        <div class="card-body">
+          <h3 class="mb-0">{{ total }}</h3>
+          <small class="text-muted">Total Guests</small>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3 mb-3">
+      <div class="card text-center shadow-sm border-success">
+        <div class="card-body">
+          <h3 class="mb-0 text-success">{{ sent }}</h3>
+          <small class="text-muted">Sent</small>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3 mb-3">
+      <div class="card text-center shadow-sm border-danger">
+        <div class="card-body">
+          <h3 class="mb-0 text-danger">{{ failed }}</h3>
+          <small class="text-muted">Failed</small>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3 mb-3">
+      <div class="card text-center shadow-sm border-warning">
+        <div class="card-body">
+          <h3 class="mb-0 text-warning">{{ pending }}</h3>
+          <small class="text-muted">Pending</small>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bulk Send Controls -->
+  <div class="card shadow-sm mb-4">
+    <div class="card-body d-flex flex-wrap gap-2 align-items-center">
+      <button class="btn btn-success" id="btn-send-pending" onclick="bulkSend(false)">
+        📤 Send to Pending Guests ({{ pending }})
+      </button>
+      <button class="btn btn-outline-warning" id="btn-send-all" onclick="bulkSend(true)">
+        🔄 Resend to All Guests
+      </button>
+      <a href="{{ url_for('view_all') }}" class="btn btn-outline-secondary ms-auto">← Back</a>
+    </div>
+  </div>
+
+  <!-- Progress Bar (hidden until bulk send starts) -->
+  <div id="progress-wrap" class="mb-4" style="display:none;">
+    <div class="d-flex justify-content-between mb-1">
+      <small id="progress-label">Sending...</small>
+      <small id="progress-count">0 / 0</small>
+    </div>
+    <div class="progress" style="height:20px;">
+      <div class="progress-bar progress-bar-striped progress-bar-animated bg-success"
+           id="progress-bar" role="progressbar" style="width:0%"></div>
+    </div>
+    <div id="bulk-result" class="mt-2"></div>
+  </div>
+
+  <!-- Guest Table -->
+  <div class="card shadow-sm">
+    <div class="card-body p-0">
+      <table class="table table-hover mb-0" id="guests-table">
+        <thead class="table-light">
+          <tr>
+            <th>#</th>
+            <th>Name</th>
+            <th>Phone</th>
+            <th>Card Type</th>
+            <th>Status</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for guest in guests %}
+          <tr id="row-{{ guest.id }}">
+            <td>{{ guest.visual_id or '—' }}</td>
+            <td>{{ guest.name }}</td>
+            <td>{{ guest.phone }}</td>
+            <td>{{ (guest.card_type or 'single') | title }}</td>
+            <td id="status-{{ guest.id }}">
+              {% if guest.whatsapp_sent %}
+                <span class="badge bg-success">Sent
+                  {% if guest.whatsapp_sent_at %}
+                    <small>({{ guest.whatsapp_sent_at.strftime('%d %b %H:%M') }})</small>
+                  {% endif %}
+                </span>
+              {% elif guest.whatsapp_error %}
+                <span class="badge bg-danger" title="{{ guest.whatsapp_error }}">Failed</span>
+              {% else %}
+                <span class="badge bg-secondary">Pending</span>
+              {% endif %}
+            </td>
+            <td>
+              <button class="btn btn-sm btn-primary" id="btn-{{ guest.id }}"
+                      onclick="sendSingle({{ guest.id }})">
+                Send
+              </button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  async function sendSingle(guestId) {
+    const btn = document.getElementById(`btn-${guestId}`);
+    const statusEl = document.getElementById(`status-${guestId}`);
+
+    btn.disabled = true;
+    btn.textContent = '⏳';
+    statusEl.innerHTML = '<span class="badge bg-info">Sending...</span>';
+
+    try {
+      const res = await fetch(`/send_card_single/${guestId}`, { method: 'POST' });
+      const data = await res.json();
+
+      if (data.success) {
+        statusEl.innerHTML = '<span class="badge bg-success">Sent ✓</span>';
+        btn.textContent = 'Resend';
+      } else {
+        statusEl.innerHTML = `<span class="badge bg-danger" title="${data.message}">Failed</span>`;
+        btn.textContent = 'Retry';
+        console.error(data.message);
+      }
+    } catch (err) {
+      statusEl.innerHTML = '<span class="badge bg-danger">Error</span>';
+      btn.textContent = 'Retry';
+    }
+
+    btn.disabled = false;
+  }
+
+  async function bulkSend(resend) {
+    const progressWrap = document.getElementById('progress-wrap');
+    const progressBar = document.getElementById('progress-bar');
+    const progressLabel = document.getElementById('progress-label');
+    const progressCount = document.getElementById('progress-count');
+    const bulkResult = document.getElementById('bulk-result');
+    const btnPending = document.getElementById('btn-send-pending');
+    const btnAll = document.getElementById('btn-send-all');
+
+    progressWrap.style.display = 'block';
+    progressBar.style.width = '0%';
+    progressLabel.textContent = 'Sending...';
+    bulkResult.innerHTML = '';
+    btnPending.disabled = true;
+    btnAll.disabled = true;
+
+    try {
+      const res = await fetch('/send_cards_bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resend }),
+      });
+
+      const data = await res.json();
+      const pct = data.total > 0 ? Math.round((data.sent / data.total) * 100) : 100;
+
+      progressBar.style.width = `${pct}%`;
+      progressCount.textContent = `${data.sent} / ${data.total}`;
+      progressLabel.textContent = 'Done';
+
+      let html = `<div class="alert alert-${data.failed > 0 ? 'warning' : 'success'} mt-2">
+        ✅ Sent: <strong>${data.sent}</strong> &nbsp;
+        ❌ Failed: <strong>${data.failed}</strong>
+      </div>`;
+
+      if (data.errors && data.errors.length > 0) {
+        html += `<ul class="list-group mt-2">`;
+        data.errors.forEach(e => {
+          html += `<li class="list-group-item list-group-item-danger">
+            <strong>${e.name}</strong>: ${e.error}
+          </li>`;
+        });
+        html += `</ul>`;
+      }
+
+      bulkResult.innerHTML = html;
+
+      // Reload page after 2s to refresh statuses
+      setTimeout(() => location.reload(), 2500);
+
+    } catch (err) {
+      bulkResult.innerHTML = `<div class="alert alert-danger">Request failed: ${err}</div>`;
+    }
+
+    btnPending.disabled = false;
+    btnAll.disabled = false;
+  }
+</script>
+
+{% endblock %}
