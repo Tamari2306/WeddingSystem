@@ -11,6 +11,8 @@ from io import BytesIO, StringIO
 from datetime import datetime
 from functools import wraps
 from urllib.parse import quote as url_encode
+from whatsapp import send_guest_card
+
 
 from flask import (
     Flask, render_template, request, redirect, url_for, flash,
@@ -34,6 +36,8 @@ from models import Guest, init_db, get_db_session
 # Environment Loading
 # ---------------------------------------------------------------------------
 flask_env = os.getenv('FLASK_ENV', 'production')
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
 
 if flask_env == 'development':
     current_env_file = '.env.development'
@@ -895,6 +899,213 @@ def clear_all_data():
             current_app.logger.error(f"Error clearing all data: {e}", exc_info=True)
 
     return redirect(url_for('view_all'))
+
+@app.route('/send_cards', methods=['GET', 'POST'])
+@login_required
+def send_cards():
+    """
+    GET  → show the send cards dashboard (counts, per-guest status)
+    POST → trigger bulk send (or single guest if guest_id param provided)
+    """
+    with get_db_session() as db:
+        guests = db.query(Guest).order_by(Guest.visual_id).all()
+ 
+        total = len(guests)
+        sent = sum(1 for g in guests if g.whatsapp_sent)
+        failed = sum(1 for g in guests if g.whatsapp_error and not g.whatsapp_sent)
+        pending = total - sent
+ 
+        return render_template(
+            'send_cards.html',
+            guests=guests,
+            total=total,
+            sent=sent,
+            failed=failed,
+            pending=pending,
+        )
+ 
+ 
+@app.route('/send_card_single/<int:guest_id>', methods=['POST'])
+@login_required
+def send_card_single(guest_id):
+    """Send card to a single guest — called via AJAX from the dashboard."""
+    with get_db_session() as db:
+        guest = db.get(Guest, guest_id)
+        if not guest:
+            return jsonify(success=False, message="Guest not found.")
+ 
+        if not guest.qr_code_url:
+            return jsonify(success=False, message="Guest has no QR code. Generate QR codes first.")
+ 
+        phone = to_whatsapp_number(guest.phone)
+        if not phone:
+            return jsonify(success=False, message="Guest has no valid phone number.")
+ 
+        try:
+            # Download guest card from Supabase
+            card_fname = card_filename_from_guest(guest)
+            try:
+                card_bytes = download_from_supabase(CARDS_BUCKET, card_fname)
+            except Exception:
+                # Card not generated yet — generate it on the fly
+                card_bytes = _generate_card_bytes(guest)
+                if card_bytes:
+                    upload_to_supabase(CARDS_BUCKET, card_fname, card_bytes)
+ 
+            if not card_bytes:
+                return jsonify(success=False, message="Could not generate or retrieve guest card.")
+ 
+            # Send via WhatsApp
+            from whatsapp import send_guest_card as wa_send
+            wa_send(
+                to=phone,
+                guest_name=guest.name or "Guest",
+                visual_id=guest.visual_id,
+                card_type=guest.card_type,
+                image_bytes=card_bytes,
+                filename=card_fname,
+            )
+ 
+            guest.whatsapp_sent = True
+            guest.whatsapp_sent_at = datetime.now()
+            guest.whatsapp_error = None
+            db.commit()
+ 
+            return jsonify(
+                success=True,
+                message=f"Card sent to {guest.name} ({phone})",
+                guest_id=guest_id,
+            )
+ 
+        except Exception as e:
+            error_msg = str(e)
+            guest.whatsapp_sent = False
+            guest.whatsapp_error = error_msg[:500]
+            db.commit()
+            current_app.logger.error(f"WhatsApp send failed for guest {guest_id}: {e}", exc_info=True)
+            return jsonify(success=False, message=error_msg, guest_id=guest_id)
+ 
+ 
+@app.route('/send_cards_bulk', methods=['POST'])
+@login_required
+def send_cards_bulk():
+    """
+    Send cards to all unsent guests (or all if resend=true).
+    Returns a JSON stream of results — called via AJAX.
+    """
+    resend = request.json.get('resend', False) if request.is_json else False
+ 
+    with get_db_session() as db:
+        if resend:
+            guests = db.query(Guest).order_by(Guest.visual_id).all()
+        else:
+            guests = db.query(Guest).filter(
+                (Guest.whatsapp_sent == False) | (Guest.whatsapp_sent == None)
+            ).order_by(Guest.visual_id).all()
+ 
+    results = {"total": len(guests), "sent": 0, "failed": 0, "errors": []}
+ 
+    from whatsapp import send_guest_card as wa_send
+ 
+    for guest in guests:
+        phone = to_whatsapp_number(guest.phone)
+        if not phone:
+            results["failed"] += 1
+            results["errors"].append({"name": guest.name, "error": "No phone number"})
+            continue
+ 
+        try:
+            card_fname = card_filename_from_guest(guest)
+            try:
+                card_bytes = download_from_supabase(CARDS_BUCKET, card_fname)
+            except Exception:
+                card_bytes = _generate_card_bytes(guest)
+                if card_bytes:
+                    upload_to_supabase(CARDS_BUCKET, card_fname, card_bytes)
+ 
+            if not card_bytes:
+                raise ValueError("Could not retrieve or generate card image.")
+ 
+            wa_send(
+                to=phone,
+                guest_name=guest.name or "Guest",
+                visual_id=guest.visual_id,
+                card_type=guest.card_type,
+                image_bytes=card_bytes,
+                filename=card_fname,
+            )
+ 
+            with get_db_session() as db2:
+                g = db2.get(Guest, guest.id)
+                if g:
+                    g.whatsapp_sent = True
+                    g.whatsapp_sent_at = datetime.now()
+                    g.whatsapp_error = None
+                    db2.commit()
+ 
+            results["sent"] += 1
+ 
+        except Exception as e:
+            error_msg = str(e)
+            with get_db_session() as db2:
+                g = db2.get(Guest, guest.id)
+                if g:
+                    g.whatsapp_sent = False
+                    g.whatsapp_error = error_msg[:500]
+                    db2.commit()
+            results["failed"] += 1
+            results["errors"].append({"name": guest.name, "error": error_msg})
+            current_app.logger.error(f"Bulk send failed for {guest.name}: {e}")
+ 
+    return jsonify(results)
+ 
+ 
+# ----------------------------------------------------------------
+# Helper: generate card image bytes in memory (reuses generate logic)
+# ----------------------------------------------------------------
+def _generate_card_bytes(guest) -> bytes | None:
+    """Generate a guest card image in memory and return PNG bytes."""
+    template_path = os.path.join("static", "Card Template.jpg")
+    font_path = os.path.join("static", "fonts", "Roboto-Bold.ttf")
+ 
+    if not os.path.exists(template_path) or not os.path.exists(font_path):
+        return None
+ 
+    try:
+        CARD_W, CARD_H = 1240, 1748
+        qr_data = download_from_supabase(QR_BUCKET, qr_filename_from_guest(guest))
+        qr_img = Image.open(BytesIO(qr_data)).resize((175, 175))
+ 
+        img = Image.open(template_path).convert("RGB")
+        draw = ImageDraw.Draw(img)
+ 
+        name_font = ImageFont.truetype(font_path, 50)
+        card_type_font = ImageFont.truetype(font_path, 35)
+        visual_id_font = ImageFont.truetype(font_path, 35)
+ 
+        wrapped = textwrap.fill((guest.name or "").upper(), width=20)
+        lines = wrapped.split('\n')
+        line_h = name_font.getbbox("A")[3] + 10
+        start_y = 550 - (line_h * len(lines)) // 2
+        for i, line in enumerate(lines):
+            draw.text((550, start_y + i * line_h), line, font=name_font, fill="#000000")
+ 
+        img.paste(qr_img, (750, CARD_H - 175 - 180))
+        draw.text((770, CARD_H - 45 - 355), (guest.card_type or "").upper(),
+                  font=card_type_font, fill="#CC3332")
+ 
+        vis_text = f"NO. {guest.visual_id:04d}"
+        box = draw.textbbox((0, 0), vis_text, font=visual_id_font)
+        draw.text((CARD_W - (box[2]-box[0]) - 25, CARD_H - (box[3]-box[1]) - 75),
+                  vis_text, font=visual_id_font, fill="#CC3332")
+ 
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+ 
+    except Exception as e:
+        logging.error(f"_generate_card_bytes failed for {guest.name}: {e}")
+        return None
 
 
 if __name__ == "__main__":
