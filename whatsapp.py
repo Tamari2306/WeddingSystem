@@ -1,128 +1,213 @@
-# whatsapp.py — Meta Cloud API helper using Message Templates
+# whatsapp.py — Meta Cloud API helper
+# Supports per-event template configs stored as JSON in the Event model.
+#
+# wa_template_config JSON structure (stored per event):
+# {
+#   "has_image_header": true,        -- whether template header is an image
+#   "body_vars": ["guest_name", "card_number"],  -- ordered list of body variables
+#                                       supported vars: guest_name, card_number, event_name
+#   "has_buttons": true              -- whether template has quick-reply buttons
+# }
+#
+# Default (backwards compatible with event_invitation template):
+# { "has_image_header": true, "body_vars": ["guest_name", "card_number"], "has_buttons": true }
 
 import os
+import json
 import requests
 import logging
 
-WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
-WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
-WHATSAPP_API_VERSION = "v19.0"
-WHATSAPP_API_BASE = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}"
+WHATSAPP_API_VERSION = "v21.0"
+WHATSAPP_API_BASE    = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}"
 
-# ── Defaults (used when event has no override) ───────────────────────────────
-DEFAULT_TEMPLATE_NAME = "event_invitation"
-DEFAULT_TEMPLATE_LANGUAGE = "sw"
+# Default template config — matches the existing event_invitation template
+DEFAULT_TEMPLATE_CONFIG = {
+    "has_image_header": True,
+    "body_vars":        ["guest_name", "card_number"],
+    "has_buttons":      True,
+}
 
 
-def _headers(access_token: str = None):
-    token = access_token or WHATSAPP_ACCESS_TOKEN
+def _token(event=None):
+    """Per-event token, falls back to global env var."""
+    if event and getattr(event, 'wa_access_token', None):
+        return event.wa_access_token
+    return os.getenv("WHATSAPP_ACCESS_TOKEN")
+
+
+def _phone_number_id(event=None):
+    """Per-event phone number ID, falls back to global env var."""
+    if event and getattr(event, 'wa_phone_number_id', None):
+        return event.wa_phone_number_id
+    return os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+
+
+def _template_name(event=None):
+    if event and getattr(event, 'wa_template_name', None):
+        return event.wa_template_name
+    return os.getenv("WHATSAPP_TEMPLATE_NAME", "event_invitation")
+
+
+def _template_language(event=None):
+    if event and getattr(event, 'wa_template_language', None):
+        return event.wa_template_language
+    return os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "sw")
+
+
+def _template_config(event=None) -> dict:
+    """Parse the per-event template config JSON, or return default."""
+    if event and getattr(event, 'wa_template_config', None):
+        try:
+            return json.loads(event.wa_template_config)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return DEFAULT_TEMPLATE_CONFIG
+
+
+def _headers(event=None):
+    token = _token(event)
+    if not token:
+        raise RuntimeError("WHATSAPP_ACCESS_TOKEN is not set.")
     return {
         "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
+        "Content-Type":  "application/json",
     }
 
 
 def upload_media(image_bytes: bytes, filename: str,
-                 mime_type: str = "image/png",
-                 phone_number_id: str = None,
-                 access_token: str = None) -> str:
+                 mime_type: str = "image/jpeg", event=None) -> str:
     """Upload image to Meta, return media_id."""
-    pid = phone_number_id or WHATSAPP_PHONE_NUMBER_ID
-    url = f"{WHATSAPP_API_BASE}/{pid}/media"
-    headers = {"Authorization": f"Bearer {access_token or WHATSAPP_ACCESS_TOKEN}"}
-    files = {"file": (filename, image_bytes, mime_type)}
-    data = {"messaging_product": "whatsapp", "type": mime_type}
+    phone_id = _phone_number_id(event)
+    token    = _token(event)
+    if not phone_id:
+        raise RuntimeError("WHATSAPP_PHONE_NUMBER_ID is not set.")
+    if not token:
+        raise RuntimeError("WHATSAPP_ACCESS_TOKEN is not set.")
+
+    url     = f"{WHATSAPP_API_BASE}/{phone_id}/media"
+    headers = {"Authorization": f"Bearer {token}"}
+    files   = {"file": (filename, image_bytes, mime_type)}
+    data    = {"messaging_product": "whatsapp", "type": mime_type}
+
+    logging.info(f"Uploading media — file: {filename}, size: {len(image_bytes)} bytes")
     response = requests.post(url, headers=headers, files=files, data=data)
+
     if not response.ok:
-        logging.error(f"Media upload failed: {response.status_code} {response.text}")
+        logging.error(f"Media upload failed: {response.status_code} — {response.text}")
         response.raise_for_status()
-    result = response.json()
+
+    result   = response.json()
     media_id = result.get("id")
     if not media_id:
-        raise ValueError(f"No media_id in response: {result}")
-    logging.info(f"Uploaded media: {media_id}")
+        raise ValueError(f"No media_id in Meta response: {result}")
+
+    logging.info(f"Media uploaded — media_id: {media_id}")
     return media_id
 
 
+def _build_components(config: dict, media_id: str | None,
+                       guest_name: str, card_number: str,
+                       event_name: str = "") -> list:
+    """Build the template components list from config."""
+    components = []
+
+    # Header
+    if config.get("has_image_header", True) and media_id:
+        components.append({
+            "type": "header",
+            "parameters": [
+                {"type": "image", "image": {"id": media_id}}
+            ],
+        })
+
+    # Body variables
+    var_map = {
+        "guest_name":   guest_name,
+        "card_number":  card_number,
+        "event_name":   event_name,
+    }
+    body_vars = config.get("body_vars", ["guest_name", "card_number"])
+    if body_vars:
+        components.append({
+            "type": "body",
+            "parameters": [
+                {"type": "text", "text": var_map.get(v, "")}
+                for v in body_vars
+            ],
+        })
+
+    return components
+
+
 def send_template_message(to: str, guest_name: str, card_number: str,
-                          media_id: str,
-                          template_name: str = None,
-                          template_language: str = None,
-                          phone_number_id: str = None,
-                          access_token: str = None) -> dict:
+                           media_id: str | None, event=None,
+                           event_name: str = "") -> dict:
     """
     Send a WhatsApp template message.
-    Falls back to DEFAULT_TEMPLATE_NAME / DEFAULT_TEMPLATE_LANGUAGE / env vars
-    if no per-event overrides are supplied.
+    Uses per-event config to build the correct component structure.
+    Returns dict with 'status': 'sent' | 'invalid_number' | 'failed'
     """
-    pid = phone_number_id or WHATSAPP_PHONE_NUMBER_ID
-    t_name = template_name or DEFAULT_TEMPLATE_NAME
-    t_lang = template_language or DEFAULT_TEMPLATE_LANGUAGE
+    phone_id = _phone_number_id(event)
+    if not phone_id:
+        raise RuntimeError("WHATSAPP_PHONE_NUMBER_ID is not set.")
 
-    url = f"{WHATSAPP_API_BASE}/{pid}/messages"
+    config   = _template_config(event)
+    tmpl     = _template_name(event)
+    lang     = _template_language(event)
+    comps    = _build_components(config, media_id, guest_name, card_number, event_name)
+
+    url = f"{WHATSAPP_API_BASE}/{phone_id}/messages"
     payload = {
         "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": to,
-        "type": "template",
+        "recipient_type":    "individual",
+        "to":                to,
+        "type":              "template",
         "template": {
-            "name": t_name,
-            "language": {"code": t_lang},
-            "components": [
-                {
-                    "type": "header",
-                    "parameters": [
-                        {"type": "image", "image": {"id": media_id}}
-                    ],
-                },
-                {
-                    "type": "body",
-                    "parameters": [
-                        {"type": "text", "text": guest_name},
-                        {"type": "text", "text": card_number},
-                    ],
-                },
-            ],
+            "name":       tmpl,
+            "language":   {"code": lang},
+            "components": comps,
         },
     }
 
-    response = requests.post(url, headers=_headers(access_token), json=payload)
+    logging.info(f"Sending WA template '{tmpl}' to {to} — guest: {guest_name}, card: {card_number}")
+    response = requests.post(url, headers=_headers(event), json=payload)
+    logging.info(f"Meta response: {response.status_code} — {response.text}")
+
     if not response.ok:
         error_data = response.json() if response.content else {}
-        error_code = (
-            error_data.get("error", {}).get("code") or
-            error_data.get("error", {}).get("error_data", {}).get("details")
-        )
+        error_code = error_data.get("error", {}).get("code")
+        logging.error(f"Template send failed — code: {error_code} — {error_data}")
+
         if response.status_code == 400 and error_code == 131026:
-            logging.warning(f"Invalid WhatsApp number: {to}")
+            logging.warning(f"Number not on WhatsApp: {to}")
             return {"status": "invalid_number", "to": to}
-        logging.error(f"Template send failed: {response.status_code} {response.text}")
+
         response.raise_for_status()
 
-    result = response.json()
+    result           = response.json()
     result["status"] = "sent"
+    logging.info(f"WA message queued for {to} — {result}")
     return result
 
 
 def send_guest_card(to: str, guest_name: str, visual_id: int,
-                    card_type: str, image_bytes: bytes, filename: str,
-                    template_name: str = None,
-                    template_language: str = None,
-                    phone_number_id: str = None,
-                    access_token: str = None) -> dict:
+                    card_type: str, image_bytes: bytes,
+                    filename: str, event=None) -> dict:
     """Upload card image then send template. Returns API response."""
-    media_id = upload_media(
-        image_bytes, filename,
-        phone_number_id=phone_number_id,
-        access_token=access_token,
-    )
+    logging.info(f"send_guest_card — to: {to}, guest: {guest_name}, id: {visual_id}")
+    config   = _template_config(event)
+    media_id = None
+
+    if config.get("has_image_header", True) and image_bytes:
+        media_id = upload_media(image_bytes, filename, event=event)
+
+    ev_name = getattr(event, 'name', '') if event else ''
+
     return send_template_message(
         to=to,
         guest_name=guest_name,
         card_number=f"{visual_id:04d}",
         media_id=media_id,
-        template_name=template_name,
-        template_language=template_language,
-        phone_number_id=phone_number_id,
-        access_token=access_token,
+        event=event,
+        event_name=ev_name,
     )
