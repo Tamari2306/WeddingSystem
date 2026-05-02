@@ -122,6 +122,95 @@
   </div>
 </form>
 
+<!-- Card Layout Config -->
+<div class="card p-4 shadow-sm mb-4">
+  <h5 class="mb-1 text-dark">📐 Card Layout Configuration</h5>
+  <p class="text-muted mb-3" style="font-size:.875rem">
+    Define where each element is placed on your card template. Coordinates are in pixels
+    relative to the top-left of the card image (default template is 1240×1748px).
+    Leave blank to use default positions.
+  </p>
+  <form method="POST" action="{{ url_for('event_edit', event_id=event.id) if event else '#' }}">
+
+  <div class="row g-3 mb-3">
+    <div class="col-12">
+      <label class="form-label fw-bold">Layout Config (JSON)</label>
+      <textarea name="card_layout_config" id="layoutConfig" class="form-control font-monospace"
+                rows="8"
+                placeholder='Leave blank for defaults. Example:
+{
+  "card_num": {"x": 45, "y": 50, "size": 38, "color": "#185a3f"},
+  "name":     {"cx": 303, "y": 550, "max_width": 358, "color": "#000000"},
+  "qr":       {"x": 45, "y": 1503, "size": 200},
+  "card_type":{"gap": 20, "size": 36, "color": "#185a3f"},
+  "show_card_num": true,
+  "show_name": true,
+  "show_qr": true,
+  "show_card_type": true
+}'>{{ event.card_layout_config if event else '' }}</textarea>
+      <div class="form-text mt-2">
+        <strong>card_num:</strong> x, y = top-left corner of card number text &nbsp;|&nbsp;
+        <strong>name.cx</strong> = horizontal centre of name &nbsp;|&nbsp;
+        <strong>name.y</strong> = vertical centre of name line &nbsp;|&nbsp;
+        <strong>qr:</strong> x, y = top-left of QR code box &nbsp;|&nbsp;
+        <strong>show_*</strong>: set to <code>false</code> to hide an element entirely
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick presets -->
+  <div class="mb-3">
+    <label class="form-label fw-bold">Quick Presets</label><br>
+    <button type="button" class="btn btn-sm btn-outline-success me-2"
+            onclick="applyPreset('default')">Default (1240×1748)</button>
+    <button type="button" class="btn btn-sm btn-outline-primary me-2"
+            onclick="applyPreset('nonum')">No Card Number</button>
+    <button type="button" class="btn btn-sm btn-outline-warning me-2"
+            onclick="applyPreset('centerqr')">QR Centre-Bottom</button>
+    <button type="button" class="btn btn-sm btn-outline-secondary"
+            onclick="applyPreset('nameonly')">Name + QR only</button>
+  </div>
+
+  <button type="submit" class="btn btn-primary">Save Layout</button>
+  </form>
+
+  <script>
+  const PRESETS = {
+    default: {
+      card_num:  {x:45, y:50, size:38, color:"#185a3f"},
+      name:      {cx:303, y:550, max_width:358, color:"#000000"},
+      qr:        {x:45, y:1503, size:200},
+      card_type: {gap:20, size:36, color:"#185a3f"},
+      show_card_num:true, show_name:true, show_qr:true, show_card_type:true
+    },
+    nonum: {
+      card_num:  {x:45, y:50, size:38, color:"#185a3f"},
+      name:      {cx:303, y:550, max_width:358, color:"#000000"},
+      qr:        {x:45, y:1503, size:200},
+      card_type: {gap:20, size:36, color:"#185a3f"},
+      show_card_num:false, show_name:true, show_qr:true, show_card_type:true
+    },
+    centerqr: {
+      card_num:  {x:45, y:50, size:38, color:"#185a3f"},
+      name:      {cx:620, y:550, max_width:500, color:"#000000"},
+      qr:        {x:520, y:1503, size:200},
+      card_type: {gap:20, size:36, color:"#185a3f"},
+      show_card_num:true, show_name:true, show_qr:true, show_card_type:false
+    },
+    nameonly: {
+      card_num:  {x:45, y:50, size:38, color:"#185a3f"},
+      name:      {cx:620, y:874, max_width:1100, color:"#000000"},
+      qr:        {x:45, y:1503, size:200},
+      card_type: {gap:20, size:36, color:"#185a3f"},
+      show_card_num:false, show_name:true, show_qr:true, show_card_type:false
+    },
+  };
+  function applyPreset(key) {
+    document.getElementById('layoutConfig').value = JSON.stringify(PRESETS[key], null, 2);
+  }
+  </script>
+</div>
+
 {% if event %}
 <!-- Card Template Upload (edit mode only) -->
 <div class="card p-4 shadow-sm">
@@ -133,11 +222,15 @@
   {% if event.card_template_url %}
   <div class="mb-3">
     <span class="badge bg-success">✅ Template uploaded</span>
-    <a href="{{ event.card_template_url }}" target="_blank" class="ms-2 small">Preview</a>
+    <a href="{{ event.card_template_url }}" target="_blank" class="ms-2 small">View template</a>
+    <a href="{{ url_for('event_preview_card', event_id=event.id) }}" target="_blank"
+       class="btn btn-sm btn-outline-success ms-3">👁 Preview Card</a>
   </div>
   {% else %}
   <div class="mb-3">
     <span class="badge bg-secondary">No template yet — using global default</span>
+    <a href="{{ url_for('event_preview_card', event_id=event.id) }}" target="_blank"
+       class="btn btn-sm btn-outline-secondary ms-3">👁 Preview with default template</a>
   </div>
   {% endif %}
   <form method="POST"

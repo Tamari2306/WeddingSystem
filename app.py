@@ -16,6 +16,15 @@ EAT = timezone(timedelta(hours=3))
 def now_eat() -> datetime:
     """Return current datetime in East Africa Time (UTC+3)."""
     return datetime.now(tz=EAT)
+
+def fmt_eat(dt, fmt='%H:%M') -> str:
+    """Format a datetime in EAT (UTC+3), converting from UTC if needed."""
+    if not dt:
+        return '—'
+    if dt.tzinfo is None:
+        # Stored as naive UTC (Supabase/Postgres default) — attach UTC then convert
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(EAT).strftime(fmt)
 from functools import wraps
 from urllib.parse import quote as url_encode
 from whatsapp import send_guest_card
@@ -270,13 +279,41 @@ def _fit_name_font(draw, name: str, max_width: int):
     return font, wrapped.split("\n")
 
 
-def _draw_card(guest, qr_img: Image.Image, template_bytes=None) -> Image.Image:
+# Default card layout — used when no per-event layout is configured
+DEFAULT_CARD_LAYOUT = {
+    "card_num": {"x": 45,  "y": 50,   "size": 38, "color": "#185a3f"},
+    "name":     {"cx": 303,"y": 550,  "max_width": 358, "color": "#000000"},
+    "qr":       {"x": 45,  "y": 1503, "size": 200},
+    "card_type":{"gap": 20, "size": 36, "color": "#185a3f"},
+    "show_card_num":  True,
+    "show_name":      True,
+    "show_qr":        True,
+    "show_card_type": True,
+}
+
+def _parse_layout(event=None) -> dict:
+    """Return layout config dict for the event, falling back to defaults."""
+    import json
+    base = dict(DEFAULT_CARD_LAYOUT)
+    if event and getattr(event, 'card_layout_config', None):
+        try:
+            overrides = json.loads(event.card_layout_config)
+            # Deep merge
+            for k, v in overrides.items():
+                if isinstance(v, dict) and isinstance(base.get(k), dict):
+                    base[k] = {**base[k], **v}
+                else:
+                    base[k] = v
+        except Exception:
+            pass
+    return base
+
+
+def _draw_card(guest, qr_img: Image.Image, template_bytes=None, event=None) -> Image.Image:
     """
-    Card layout:
-    1. Card number  → top-left  (NO. XXXX)
-    2. Guest name   → centred on dotted-line placeholder
-    3. QR code      → bottom-left
-    4. Card type    → above QR  (SINGLE / DOUBLE / FAMILY)
+    Draw a guest card using the template image and per-event layout config.
+    Element positions come from event.card_layout_config (JSON), falling back
+    to DEFAULT_CARD_LAYOUT if not set.
     """
     # Per-event template takes priority over the global static one
     if template_bytes:
@@ -286,39 +323,55 @@ def _draw_card(guest, qr_img: Image.Image, template_bytes=None) -> Image.Image:
         if not os.path.exists(template_path):
             raise FileNotFoundError(f"Card template not found: {template_path}")
         img = Image.open(template_path).convert("RGB")
+
+    L    = _parse_layout(event)
     draw = ImageDraw.Draw(img)
     fp   = _bold_font_path()
 
-    num_font  = ImageFont.truetype(fp, CARD_NUM_SIZE)
-    type_font = ImageFont.truetype(fp, CARD_TYPE_SIZE)
+    # 1. Card number
+    if L.get("show_card_num", True):
+        cn     = L["card_num"]
+        nfont  = ImageFont.truetype(fp, cn.get("size", CARD_NUM_SIZE))
+        draw.text((cn.get("x", CARD_NUM_TOP_X), cn.get("y", CARD_NUM_TOP_Y)),
+                  f"NO. {str(guest.visual_id or 0).zfill(4)}",
+                  font=nfont, fill=cn.get("color", CARD_NUM_COLOR))
 
-    # 1. Card number — top-left
-    draw.text((CARD_NUM_TOP_X, CARD_NUM_TOP_Y),
-              f"NO. {str(guest.visual_id or 0).zfill(4)}",
-              font=num_font, fill=CARD_NUM_COLOR)
+    # 2. Guest name
+    if L.get("show_name", True):
+        nm       = L["name"]
+        raw_name = (guest.name or "GUEST").upper()
+        name_font, lines = _fit_name_font(draw, raw_name, nm.get("max_width", NAME_MAX_WIDTH))
+        sample_bbox = name_font.getbbox("Ag")
+        font_h      = sample_bbox[3] - sample_bbox[1]
+        line_h      = font_h + 6
+        total_h     = line_h * len(lines) - 6
+        name_y      = nm.get("y", NAME_DOTTED_Y)
+        block_top_y = name_y - total_h // 2
+        cx          = nm.get("cx", NAME_CENTER_X)
+        for i, line in enumerate(lines):
+            bbox   = draw.textbbox((0, 0), line, font=name_font)
+            text_w = bbox[2] - bbox[0]
+            draw.text((cx - text_w // 2, block_top_y + i * line_h),
+                      line, font=name_font, fill=nm.get("color", "#000000"))
 
-    # 2. Guest name — dotted line
-    raw_name    = (guest.name or "GUEST").upper()
-    name_font, lines = _fit_name_font(draw, raw_name, NAME_MAX_WIDTH)
-    sample_bbox = name_font.getbbox("Ag")
-    font_h      = sample_bbox[3] - sample_bbox[1]
-    line_h      = font_h + 6
-    total_h     = line_h * len(lines) - 6
-    block_top_y = NAME_DOTTED_Y - total_h // 2
-    for i, line in enumerate(lines):
-        bbox   = draw.textbbox((0, 0), line, font=name_font)
-        text_w = bbox[2] - bbox[0]
-        draw.text((NAME_CENTER_X - text_w // 2, block_top_y + i * line_h),
-                  line, font=name_font, fill="#000000")
+    # 3. QR code
+    if L.get("show_qr", True):
+        qr      = L["qr"]
+        qr_size = qr.get("size", QR_SIZE)
+        img.paste(qr_img.resize((qr_size, qr_size), Image.LANCZOS),
+                  (qr.get("x", QR_X), qr.get("y", QR_Y)))
 
-    # 3. QR code — bottom-left
-    img.paste(qr_img.resize((QR_SIZE, QR_SIZE), Image.LANCZOS), (QR_X, QR_Y))
-
-    # 4. Card type — above QR
-    type_label = "GROUP" if (guest.card_type or "").lower() == "family" else (guest.card_type or "SINGLE").upper()
-    type_bbox  = draw.textbbox((0, 0), type_label, font=type_font)
-    draw.text((QR_X, QR_Y - (type_bbox[3] - type_bbox[1]) - CARD_TYPE_GAP),
-              type_label, font=type_font, fill=CARD_TYPE_COLOR)
+        # 4. Card type label (above QR)
+        if L.get("show_card_type", True):
+            ct       = L["card_type"]
+            tfont    = ImageFont.truetype(fp, ct.get("size", CARD_TYPE_SIZE))
+            type_lbl = "GROUP" if (guest.card_type or "").lower() == "family"                        else (guest.card_type or "SINGLE").upper()
+            tbbox    = draw.textbbox((0, 0), type_lbl, font=tfont)
+            qr_y     = qr.get("y", QR_Y)
+            draw.text((qr.get("x", QR_X),
+                       qr_y - (tbbox[3] - tbbox[1]) - ct.get("gap", CARD_TYPE_GAP)),
+                      type_lbl, font=tfont,
+                      fill=ct.get("color", CARD_TYPE_COLOR))
 
     return img
 
@@ -334,7 +387,7 @@ def _render_and_upload_card(guest, event=None) -> bool:
 
         template_bytes = _get_event_template_bytes(event)
         qr_img = Image.open(BytesIO(qr_data))
-        img    = _draw_card(guest, qr_img, template_bytes=template_bytes)
+        img    = _draw_card(guest, qr_img, template_bytes=template_bytes, event=event)
         buf    = BytesIO()
         img.save(buf, format="JPEG", quality=92)
         buf.seek(0)
@@ -367,7 +420,7 @@ def _generate_card_bytes(guest, event=None) -> bytes | None:
 
         template_bytes = _get_event_template_bytes(event)
         qr_img = Image.open(BytesIO(qr_data))
-        img    = _draw_card(guest, qr_img, template_bytes=template_bytes)
+        img    = _draw_card(guest, qr_img, template_bytes=template_bytes, event=event)
         buf    = BytesIO()
         img.save(buf, format="JPEG", quality=92)
         buf.seek(0)
@@ -462,7 +515,7 @@ def build_sms_message(guest, event=None) -> str:
     return (
         f"MWALIKO\n"
         f"Habari {guest.name},\n"
-        f"Umealikwa {type_label} ya:\n"
+        f"Mwaliko wa {type_label} ya:\n"
         f"{weds.upper()}\n"
         f"{day.upper()}, {date.upper()}\n"
         f"Saa 12:00 Jioni\n"
@@ -622,6 +675,7 @@ def event_new():
                 wa_template_name     = request.form.get('wa_template_name','event_invitation').strip() or 'event_invitation',
                 wa_template_language = request.form.get('wa_template_language','sw').strip() or 'sw',
                 wa_template_config   = request.form.get('wa_template_config','').strip() or None,
+                card_layout_config   = request.form.get('card_layout_config','').strip() or None,
                 at_username    = request.form.get('at_username','').strip() or None,
                 at_api_key     = request.form.get('at_api_key','').strip() or None,
                 at_sender_id   = request.form.get('at_sender_id','').strip() or None,
@@ -658,6 +712,7 @@ def event_edit(event_id):
             ev.wa_template_name     = request.form.get('wa_template_name','event_invitation').strip() or 'event_invitation'
             ev.wa_template_language = request.form.get('wa_template_language','sw').strip() or 'sw'
             ev.wa_template_config   = request.form.get('wa_template_config','').strip() or None
+            ev.card_layout_config   = request.form.get('card_layout_config','').strip() or None
             ev.at_username    = request.form.get('at_username','').strip() or None
             ev.at_api_key     = request.form.get('at_api_key','').strip() or None
             ev.at_sender_id   = request.form.get('at_sender_id','').strip() or None
@@ -676,6 +731,7 @@ def event_edit(event_id):
             'wa_template_name': ev.wa_template_name or 'event_invitation',
             'wa_template_language': ev.wa_template_language or 'sw',
             'wa_template_config': ev.wa_template_config or '',
+            'card_layout_config': ev.card_layout_config or '',
             'at_username': ev.at_username or '',
             'at_api_key': ev.at_api_key or '',
             'at_sender_id': ev.at_sender_id or '',
@@ -707,6 +763,41 @@ def event_archive(event_id):
             state = 'reactivated' if ev.is_active else 'archived'
             flash(f'Event "{ev.name}" {state}.', 'success')
     return redirect(url_for('events_list'))
+
+
+@app.route('/events/<int:event_id>/preview_card')
+@admin_required
+def event_preview_card(event_id):
+    """Generate a sample card using the current event template + layout config."""
+    with get_db_session() as db:
+        ev = db.get(Event, event_id)
+        if not ev:
+            return "Event not found", 404
+        template_bytes = _get_event_template_bytes(ev)
+
+    # Create a dummy guest for preview
+    class _DummyGuest:
+        visual_id = 1
+        name      = "SAMPLE GUEST"
+        card_type = "single"
+        group_size= 1
+    try:
+        _bold_font_path()
+        qr_data = generate_qr_bytes("PREVIEW-QR")
+        qr_img  = Image.open(BytesIO(qr_data))
+        img     = _draw_card(_DummyGuest(), qr_img,
+                             template_bytes=template_bytes, event=ev)
+        # Scale down to ~400px wide for preview
+        w, h = img.size
+        scale = 400 / w
+        img = img.resize((400, int(h * scale)), Image.LANCZOS)
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        buf.seek(0)
+        from flask import Response
+        return Response(buf.read(), mimetype='image/jpeg')
+    except Exception as e:
+        return f"Preview failed: {e}", 500
 
 
 @app.route('/events/<int:event_id>/upload_template', methods=['POST'])
@@ -1001,7 +1092,7 @@ def search_guests():
             "has_entered": g.has_entered,
             "checked_in_count": g.checked_in_count,   # ← ADD THIS
             "group_size": g.group_size,               # ← ADD THIS
-            "entry_time": g.entry_time.strftime('%Y-%m-%d %H:%M:%S') if g.entry_time else 'N/A',
+            "entry_time": fmt_eat(g.entry_time, '%Y-%m-%d %H:%M:%S') if g.entry_time else 'N/A',
             "card_type": g.card_type
         } for g in guests])
 
@@ -1049,7 +1140,7 @@ def download_excel():
         ws.cell(i,1,g.id);       ws.cell(i,2,g.name);      ws.cell(i,3,g.phone)
         ws.cell(i,4,g.qr_code_id)
         ws.cell(i,5,"Entered" if g.has_entered else "Not Entered")
-        ws.cell(i,6,g.entry_time.strftime('%Y-%m-%d %H:%M:%S') if g.entry_time else "")
+        ws.cell(i,6,fmt_eat(g.entry_time, '%Y-%m-%d %H:%M:%S') if g.entry_time else "")
         ws.cell(i,7,g.visual_id); ws.cell(i,8,g.card_type); ws.cell(i,9,g.group_size)
         ws.cell(i,10,"Yes" if g.has_whatsapp else ("No" if g.has_whatsapp is False else "Unknown"))
         ws.cell(i,11,g.rsvp_status or "—")
@@ -1389,7 +1480,7 @@ def download_card_by_id(visual_id):
             ev             = get_active_event(db)
             template_bytes = _get_event_template_bytes(ev)
             qr_img = Image.open(BytesIO(qr_data))
-            img    = _draw_card(guest, qr_img, template_bytes=template_bytes)
+            img    = _draw_card(guest, qr_img, template_bytes=template_bytes, event=ev)
             buf    = BytesIO()
             img.save(buf, format="JPEG", quality=92)
             buf.seek(0)
@@ -1439,10 +1530,10 @@ def download_all_cards():
             flash("No guests found.", "warning")
             return redirect(url_for('view_all'))
 
-        # Fetch per-event template once before the zip loop
+        # Fetch per-event template and layout once before the zip loop
         with get_db_session() as db2:
-            ev2 = get_active_event(db2)
-        active_tmpl_bytes = _get_event_template_bytes(ev2) if ev2 else None
+            active_ev = get_active_event(db2)
+        active_tmpl_bytes = _get_event_template_bytes(active_ev) if active_ev else None
 
         zip_buffer = BytesIO()
         count  = 0
@@ -1468,7 +1559,7 @@ def download_all_cards():
                     g.group_size = snap["group_size"]
 
                     qr_img     = Image.open(BytesIO(qr_data))
-                    card       = _draw_card(g, qr_img, template_bytes=active_tmpl_bytes)
+                    card       = _draw_card(g, qr_img, template_bytes=active_tmpl_bytes, event=active_ev)
                     buf    = BytesIO()
                     card.save(buf, format="JPEG", quality=92)
                     zf.writestr(snap["card_fname"], buf.getvalue())
@@ -1517,7 +1608,7 @@ def guest_report_data():
             "group_size":       g.group_size,
             "checked_in_count": g.checked_in_count,
             "rsvp_status":      g.rsvp_status,
-            "entry_time":       g.entry_time.strftime('%H:%M') if g.entry_time else None,
+            "entry_time":       fmt_eat(g.entry_time, '%H:%M') if g.entry_time else None,
         }
  
     total       = len(guests)
@@ -2107,7 +2198,7 @@ def download_client_report():
     # ── row builders ─────────────────────────────────────────────────────────
  
     def in_row(g, i):
-        et = g.entry_time.strftime('%H:%M') if g.entry_time else '—'
+        et = fmt_eat(g.entry_time)
         return [
             Paragraph(f"{g.visual_id:04d}", S_CELL_B),
             Paragraph(f"<b>{g.name or '—'}</b>", S_CELL),

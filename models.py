@@ -49,6 +49,7 @@ def _run_migrations(engine):
             ("event_type",        "VARCHAR DEFAULT 'Wedding'"),
             ("card_template_url", "VARCHAR"),
             ("wa_template_config","TEXT"),
+            ("card_layout_config","TEXT"),
         ]:
             if col_def[0] not in ev_cols:
                 try:
@@ -107,6 +108,7 @@ class Event(Base):
     event_type         = Column(String, nullable=True, default="Wedding")  # Wedding, Send-Off, etc.
     card_template_url  = Column(String, nullable=True)  # Supabase URL to per-event card template
     wa_template_config = Column(Text,   nullable=True)  # JSON: template component structure
+    card_layout_config = Column(Text,   nullable=True)  # JSON: card element positions
 
     # Status
     is_active   = Column(Boolean, default=True)
