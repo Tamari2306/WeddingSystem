@@ -24,10 +24,20 @@
       {% endif %}
     </div>
     <div class="card-body">
-      <p class="mb-1"><strong>Couple:</strong> {{ ev.weds_names or '—' }}</p>
+      <p class="mb-1">
+        <span class="badge bg-info text-dark me-1">{{ ev.event_type }}</span>
+        <strong>{{ ev.weds_names or '—' }}</strong>
+      </p>
       <p class="mb-1"><strong>Day:</strong> {{ ev.event_day or '—' }} &nbsp;|&nbsp; <strong>Date:</strong> {{ ev.event_date or '—' }}</p>
       <p class="mb-1"><strong>Venue:</strong> {{ ev.event_venue or '—' }}</p>
-      <p class="mb-0 text-muted"><small>{{ ev.guest_count }} guest(s)</small></p>
+      <p class="mb-1">
+        {% if ev.card_template_url %}
+          <span class="badge bg-success">🃏 Custom template</span>
+        {% else %}
+          <span class="badge bg-secondary">🃏 Default template</span>
+        {% endif %}
+        <span class="ms-2 text-muted"><small>{{ ev.guest_count }} guest(s)</small></span>
+      </p>
     </div>
     <div class="card-footer d-flex gap-2 flex-wrap">
       {% if ev.id != active_id %}

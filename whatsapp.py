@@ -206,7 +206,7 @@ def send_guest_card(to: str, guest_name: str, visual_id: int,
     return send_template_message(
         to=to,
         guest_name=guest_name,
-        card_number=f"{visual_id:04d}",
+        card_number=str(visual_id or 0).zfill(4),
         media_id=media_id,
         event=event,
         event_name=ev_name,

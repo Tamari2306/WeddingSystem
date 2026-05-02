@@ -227,7 +227,8 @@ def qr_filename_from_guest(guest) -> str:
 
 def card_filename_from_guest(guest) -> str:
     sanitized = get_safe_filename_name_part(guest.name or "GUEST")
-    return f"GUEST-{guest.visual_id:04d}-{sanitized}.jpg"
+    vid = str(guest.visual_id or 0).zfill(4)
+    return f"GUEST-{vid}-{sanitized}.jpg"
 
 # ---------------------------------------------------------------------------
 # QR Code Generation
@@ -293,7 +294,7 @@ def _draw_card(guest, qr_img: Image.Image, template_bytes=None) -> Image.Image:
 
     # 1. Card number — top-left
     draw.text((CARD_NUM_TOP_X, CARD_NUM_TOP_Y),
-              f"NO. {guest.visual_id:04d}",
+              f"NO. {str(guest.visual_id or 0).zfill(4)}",
               font=num_font, fill=CARD_NUM_COLOR)
 
     # 2. Guest name — dotted line
@@ -322,7 +323,7 @@ def _draw_card(guest, qr_img: Image.Image, template_bytes=None) -> Image.Image:
     return img
 
 
-def _render_and_upload_card(guest) -> bool:
+def _render_and_upload_card(guest, event=None) -> bool:
     """Render JPEG card for one guest and upload to Supabase. Returns True on success."""
     try:
         # Try fetching the QR; fall back to regenerating if name was edited
@@ -331,8 +332,9 @@ def _render_and_upload_card(guest) -> bool:
         except Exception:
             qr_data = generate_qr_bytes(guest.qr_code_id)
 
+        template_bytes = _get_event_template_bytes(event)
         qr_img = Image.open(BytesIO(qr_data))
-        img    = _draw_card(guest, qr_img)
+        img    = _draw_card(guest, qr_img, template_bytes=template_bytes)
         buf    = BytesIO()
         img.save(buf, format="JPEG", quality=92)
         buf.seek(0)
@@ -466,7 +468,7 @@ def build_sms_message(guest, event=None) -> str:
         f"Saa 12:00 Jioni\n"
         f"{venue.upper()}\n"
         f"\n"
-        f"Kadi No: {guest.visual_id:04d} - {(guest.card_type or 'Single').title()}\n"
+        f"Kadi No: {str(guest.visual_id or 0).zfill(4)} - {(guest.card_type or 'Single').title()}\n"
         f"Fika na kadi hii ukumbini.\n"
         f"Karibu sana! - SwiftInvite"
     )
@@ -577,11 +579,13 @@ def events_list():
             'id':           e.id,
             'name':         e.name,
             'slug':         e.slug,
+            'event_type':   e.event_type or 'Wedding',
             'weds_names':   e.weds_names,
             'event_day':    e.event_day,
             'event_date':   e.event_date,
             'event_venue':  e.event_venue,
             'is_active':    e.is_active,
+            'card_template_url': e.card_template_url or '',
             'guest_count':  db.query(Guest).filter_by(event_id=e.id).count(),
         } for e in events]
         active_id = active.id if active else None
@@ -730,11 +734,23 @@ def event_upload_template(event_id):
             buf = BytesIO()
             img_obj.save(buf, format='JPEG', quality=95)
             img_bytes = buf.getvalue()
-        url = upload_to_supabase(TEMPLATES_BUCKET, fname, img_bytes,
-                                  content_type='image/jpeg')
-        ev.card_template_url = url
-        db.commit()
-        flash(f'Card template uploaded for "{ev.name}".', 'success')
+        try:
+            url = upload_to_supabase(TEMPLATES_BUCKET, fname, img_bytes,
+                                      content_type='image/jpeg')
+            ev.card_template_url = url
+            db.commit()
+            flash(f'Card template uploaded for "{ev.name}".', 'success')
+        except Exception as upload_err:
+            err_msg = str(upload_err)
+            if 'Bucket not found' in err_msg or '404' in err_msg:
+                flash(
+                    f'Storage bucket "{TEMPLATES_BUCKET}" not found. '
+                    f'Please create it in your Supabase dashboard under Storage → New Bucket.',
+                    'danger'
+                )
+            else:
+                flash(f'Upload failed: {err_msg}', 'danger')
+            current_app.logger.error(f'Template upload error: {upload_err}')
     return redirect(url_for('event_edit', event_id=event_id))
 
 
@@ -1069,7 +1085,7 @@ def export_guests_simple():
         eid    = ev.id if ev else None
         guests = db.query(Guest).filter_by(event_id=eid).order_by(Guest.visual_id).all()
         rows = [
-            (f"{g.visual_id:04d}", g.name or '', g.phone or '', (g.card_type or '').title())
+            (str(g.visual_id or 0).zfill(4), g.name or '', g.phone or '', (g.card_type or '').title())
             for g in guests
         ]
 
@@ -1281,7 +1297,8 @@ def regenerate_qr_codes():
             for guest in guests:
                 if guest.visual_id is None:
                     guest.visual_id = get_next_visual_id(db)
-                qr_id    = f"GUEST-{guest.visual_id:04d}"
+                vid      = str(guest.visual_id).zfill(4)
+                qr_id    = f"EV{eid or 0}-GUEST-{vid}"
                 qr_bytes = generate_qr_bytes(qr_id)
                 qr_url   = upload_to_supabase(QR_BUCKET, qr_filename_from_guest(guest),
                                               qr_bytes, content_type="image/png")
@@ -1303,20 +1320,23 @@ def regenerate_qr_codes():
 @admin_required
 def generate_guest_cards():
     """Returns JSON list of visual_ids. Frontend calls /generate_card/<id> per guest."""
-    if not os.path.exists(os.path.join("static", "Card Template.jpg")):
-        return jsonify(success=False,
-                       error="Card template not found at static/Card Template.jpg"), 500
-    try:
-        _bold_font_path()
-    except FileNotFoundError as e:
-        return jsonify(success=False, error=str(e)), 500
-
     with get_db_session() as db:
-        ev     = get_active_event(db)
-        eid    = ev.id if ev else None
+        ev  = get_active_event(db)
+        eid = ev.id if ev else None
+        # Accept if either a per-event template or the global fallback exists
+        has_event_template  = bool(ev and ev.card_template_url)
+        has_global_template = os.path.exists(os.path.join("static", "Card Template.jpg"))
+        if not has_event_template and not has_global_template:
+            return jsonify(success=False,
+                           error="No card template found. Upload one in Event Settings or add the global Card Template.jpg."), 500
+        try:
+            _bold_font_path()
+        except FileNotFoundError as e:
+            return jsonify(success=False, error=str(e)), 500
         guests = db.query(Guest).filter_by(event_id=eid).order_by(Guest.visual_id).all()
         ids    = [g.visual_id for g in guests if g.qr_code_url]
-    return jsonify(success=True, visual_ids=ids, total=len(ids))
+    return jsonify(success=True, visual_ids=ids, total=len(ids),
+                   using_event_template=has_event_template)
 
 
 @app.route('/generate_card/<int:visual_id>', methods=['POST'])
@@ -1331,7 +1351,8 @@ def generate_card(visual_id):
         if not guest.qr_code_url:
             return jsonify(success=False, visual_id=visual_id,
                            error="No QR code — regenerate QR codes first"), 400
-        ok = _render_and_upload_card(guest)
+        ev = get_active_event(db)
+        ok = _render_and_upload_card(guest, event=ev)
     if ok:
         return jsonify(success=True, visual_id=visual_id, name=guest.name)
     return jsonify(success=False, visual_id=visual_id,
@@ -1365,13 +1386,16 @@ def download_card_by_id(visual_id):
             except Exception:
                 qr_data = generate_qr_bytes(guest.qr_code_id)
 
+            ev             = get_active_event(db)
+            template_bytes = _get_event_template_bytes(ev)
             qr_img = Image.open(BytesIO(qr_data))
-            img    = _draw_card(guest, qr_img)
+            img    = _draw_card(guest, qr_img, template_bytes=template_bytes)
             buf    = BytesIO()
             img.save(buf, format="JPEG", quality=92)
             buf.seek(0)
+            vid = str(guest.visual_id or 0).zfill(4)
             return send_file(buf, as_attachment=True,
-                             download_name=f"Guest-{guest.visual_id:04d}.jpg",
+                             download_name=f"Guest-{vid}.jpg",
                              mimetype="image/jpeg")
         except Exception as e:
             flash(f"Error generating card: {e}", "danger")
@@ -1415,6 +1439,11 @@ def download_all_cards():
             flash("No guests found.", "warning")
             return redirect(url_for('view_all'))
 
+        # Fetch per-event template once before the zip loop
+        with get_db_session() as db2:
+            ev2 = get_active_event(db2)
+        active_tmpl_bytes = _get_event_template_bytes(ev2) if ev2 else None
+
         zip_buffer = BytesIO()
         count  = 0
         errors = []
@@ -1438,9 +1467,8 @@ def download_all_cards():
                     g.card_type  = snap["card_type"]
                     g.group_size = snap["group_size"]
 
-                    qr_img         = Image.open(BytesIO(qr_data))
-                    tmpl_bytes     = _get_event_template_bytes(ev_obj) if 'ev_obj' in dir() else None
-                    card           = _draw_card(g, qr_img, template_bytes=tmpl_bytes)
+                    qr_img     = Image.open(BytesIO(qr_data))
+                    card       = _draw_card(g, qr_img, template_bytes=active_tmpl_bytes)
                     buf    = BytesIO()
                     card.save(buf, format="JPEG", quality=92)
                     zf.writestr(snap["card_fname"], buf.getvalue())
@@ -1652,33 +1680,33 @@ def _send_to_guest(guest, db, send_wa=True, send_sms=True, event=None):
 
     # ── WhatsApp ──────────────────────────────────────────────────────────
     if send_wa:
-        print(f"[WA DEBUG] Starting WA send for guest: {guest.name} | phone: {phone}", flush=True)
+        logging.info("[WA] Starting WA send for guest: {guest.name} | phone: {phone}")
         try:
             card_fname = card_filename_from_guest(guest)
-            print(f"[WA DEBUG] Card filename: {card_fname}", flush=True)
+            logging.info("[WA] Card filename: {card_fname}")
 
             # Try fetching from Supabase first, fall back to regenerating
             card_bytes = None
             try:
                 card_bytes = download_from_supabase(CARDS_BUCKET, card_fname)
-                print(f"[WA DEBUG] Card fetched from Supabase: {len(card_bytes)} bytes", flush=True)
+                logging.info("[WA] Card fetched from Supabase: {len(card_bytes)} bytes")
             except Exception as supa_err:
-                print(f"[WA DEBUG] Supabase fetch failed ({supa_err}), regenerating card...", flush=True)
+                logging.info("[WA] Supabase fetch failed ({supa_err}), regenerating card...")
                 card_bytes = _generate_card_bytes(guest, event=event)
                 if card_bytes:
-                    print(f"[WA DEBUG] Card regenerated: {len(card_bytes)} bytes", flush=True)
+                    logging.info("[WA] Card regenerated: {len(card_bytes)} bytes")
                     try:
                         upload_to_supabase(CARDS_BUCKET, card_fname, card_bytes,
                                            content_type="image/jpeg")
                     except Exception as up_err:
-                        print(f"[WA DEBUG] Re-upload to Supabase failed (non-fatal): {up_err}", flush=True)
+                        logging.info("[WA] Re-upload to Supabase failed (non-fatal): {up_err}")
                 else:
-                    print(f"[WA DEBUG] Card regeneration also failed!", flush=True)
+                    logging.info("[WA] Card regeneration also failed!")
 
             if not card_bytes:
                 raise ValueError("Could not retrieve or generate card image.")
 
-            print(f"[WA DEBUG] Calling send_guest_card...", flush=True)
+            logging.info("[WA] Calling send_guest_card...")
             wa_result = send_guest_card(
                 to=phone,
                 guest_name=guest.name or "Guest",
@@ -1688,7 +1716,7 @@ def _send_to_guest(guest, db, send_wa=True, send_sms=True, event=None):
                 filename=card_fname,
                 event=event,
             )
-            print(f"[WA DEBUG] send_guest_card result: {wa_result}", flush=True)
+            logging.info("[WA] send_guest_card result: {wa_result}")
 
             if wa_result.get("status") == "invalid_number":
                 guest.has_whatsapp        = False
@@ -1707,8 +1735,8 @@ def _send_to_guest(guest, db, send_wa=True, send_sms=True, event=None):
             import traceback
             err_str = str(e)[:500]
             tb      = traceback.format_exc()
-            print(f"[WA ERROR] WA send failed for {guest.name}: {err_str}", flush=True)
-            print(f"[WA ERROR] Traceback:\n{tb}", flush=True)
+            logging.error("[WA] WA send failed for {guest.name}: {err_str}")
+            logging.error("[WA] Traceback:\n{tb}")
             guest.whatsapp_sent  = False
             guest.whatsapp_error = err_str
             wa_status = "failed"
