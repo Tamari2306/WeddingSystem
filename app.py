@@ -765,6 +765,45 @@ def event_archive(event_id):
     return redirect(url_for('events_list'))
 
 
+@app.route('/events/<int:event_id>/layout_editor')
+@admin_required
+def event_layout_editor(event_id):
+    """Visual drag-and-drop card layout editor."""
+    with get_db_session() as db:
+        ev = db.get(Event, event_id)
+        if not ev:
+            flash('Event not found.', 'danger')
+            return redirect(url_for('events_list'))
+        ev_data = {
+            'id':                ev.id,
+            'name':              ev.name,
+            'card_template_url': ev.card_template_url or '',
+            'card_layout_config':ev.card_layout_config or '',
+        }
+    return render_template('layout_editor.html', event=ev_data)
+
+
+@app.route('/events/<int:event_id>/save_layout', methods=['POST'])
+@admin_required
+def event_save_layout(event_id):
+    """Save layout config JSON from the visual editor."""
+    import json
+    data = request.get_json() or {}
+    layout_json = data.get('layout_config', '')
+    # Validate JSON
+    try:
+        json.loads(layout_json)
+    except Exception as e:
+        return jsonify(success=False, error=f'Invalid JSON: {e}')
+    with get_db_session() as db:
+        ev = db.get(Event, event_id)
+        if not ev:
+            return jsonify(success=False, error='Event not found')
+        ev.card_layout_config = layout_json
+        db.commit()
+    return jsonify(success=True)
+
+
 @app.route('/events/<int:event_id>/preview_card')
 @admin_required
 def event_preview_card(event_id):

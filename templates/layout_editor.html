@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>Card Layout Editor — {{ event.name }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    * { box-sizing: border-box; }
+    body { font-family: 'Inter', sans-serif; background: #f1f5f9; }
+
+    .sidebar { width: 320px; min-width: 320px; background: #fff;
+               border-right: 1px solid #e2e8f0; height: 100vh;
+               overflow-y: auto; padding: 1.25rem; position: sticky; top: 0; }
+    .canvas-area { flex: 1; padding: 1.5rem; overflow: auto;
+                   display: flex; flex-direction: column; align-items: center; }
+
+    .card-wrap { position: relative; display: inline-block; cursor: crosshair;
+                 box-shadow: 0 4px 24px rgba(0,0,0,.15); }
+    .card-wrap img { display: block; max-width: 100%; user-select: none; }
+
+    /* Draggable element handles */
+    .el-handle {
+      position: absolute;
+      border: 2px solid;
+      border-radius: 4px;
+      cursor: move;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 11px;
+      text-align: center;
+      line-height: 1.2;
+      padding: 2px 4px;
+      white-space: nowrap;
+      transition: box-shadow .1s;
+      z-index: 10;
+    }
+    .el-handle:hover, .el-handle.active { box-shadow: 0 0 0 3px rgba(0,0,0,.3); }
+    .el-handle.hidden { opacity: .3; pointer-events: none; }
+
+    .el-card-num  { border-color: #16a34a; color: #16a34a; background: rgba(22,163,74,.1); }
+    .el-name      { border-color: #2563eb; color: #2563eb; background: rgba(37,99,235,.1); }
+    .el-qr        { border-color: #9333ea; color: #9333ea; background: rgba(147,51,234,.1); }
+    .el-card-type { border-color: #ea580c; color: #ea580c; background: rgba(234,88,12,.1); }
+
+    .resize-handle {
+      position: absolute; bottom: -4px; right: -4px;
+      width: 10px; height: 10px; background: currentColor;
+      border-radius: 50%; cursor: se-resize; opacity: .6;
+    }
+
+    /* Sidebar controls */
+    .el-card { border-radius: 8px; border: 1.5px solid #e2e8f0;
+               padding: .75rem; margin-bottom: .75rem; }
+    .el-card.active-el { border-color: #3b82f6; background: #eff6ff; }
+    .el-title { font-size: .8rem; font-weight: 700; text-transform: uppercase;
+                letter-spacing: .05em; margin-bottom: .5rem; }
+    .el-title.card-num  { color: #16a34a; }
+    .el-title.name      { color: #2563eb; }
+    .el-title.qr        { color: #9333ea; }
+    .el-title.card-type { color: #ea580c; }
+
+    .coord-row { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; margin-bottom: .4rem; }
+    .coord-inp { width: 100%; padding: .3rem .5rem; border: 1px solid #d1d5db;
+                 border-radius: 5px; font-size: .8rem; font-family: 'Inter', monospace; }
+    .coord-label { font-size: .7rem; color: #6b7280; margin-bottom: 2px; }
+
+    .btn-place { width: 100%; padding: .35rem; border-radius: 6px; border: 1.5px dashed;
+                 font-size: .78rem; font-weight: 600; cursor: pointer; background: none;
+                 margin-top: .3rem; transition: background .15s; }
+    .btn-place:hover { opacity: .8; }
+
+    .toggle-vis { display: flex; align-items: center; gap: .4rem; font-size: .8rem;
+                  margin-bottom: .4rem; cursor: pointer; }
+
+    #json-out { font-family: monospace; font-size: .72rem; background: #1e293b;
+                color: #a3e635; border-radius: 8px; padding: 1rem;
+                white-space: pre; overflow-x: auto; max-height: 220px; }
+
+    .btn-save { width: 100%; padding: .65rem; border-radius: 8px; border: none;
+                background: #185a3f; color: #fff; font-weight: 700;
+                font-size: .9rem; cursor: pointer; margin-top: .5rem; }
+    .btn-save:hover { background: #0f3d2b; }
+    .btn-save:disabled { opacity: .5; cursor: not-allowed; }
+
+    .zoom-bar { display: flex; align-items: center; gap: .5rem; margin-bottom: 1rem; }
+    .zoom-bar input { width: 120px; }
+    .save-badge { display: none; background: #16a34a; color: #fff;
+                  padding: .2rem .6rem; border-radius: 4px; font-size: .75rem;
+                  font-weight: 600; margin-left: .5rem; }
+    .save-badge.show { display: inline; }
+
+    .crosshair-hint { font-size: .75rem; color: #64748b; text-align: center;
+                      margin-top: .5rem; }
+    .no-template { text-align: center; padding: 3rem; color: #94a3b8; }
+  </style>
+</head>
+<body>
+{% include "_navbar.html" %}
+
+<div class="d-flex" style="height:calc(100vh - 56px)">
+
+  <!-- ── Sidebar ──────────────────────────────────────────────────────── -->
+  <div class="sidebar">
+    <h6 class="fw-bold mb-1">📐 Layout Editor</h6>
+    <p class="text-muted mb-3" style="font-size:.75rem">
+      {{ event.name }} — drag elements on the card to position them,
+      or click <strong>Place</strong> then click on the card.
+    </p>
+
+    <!-- Card Number -->
+    <div class="el-card" id="ctrl-card-num">
+      <div class="d-flex justify-content-between align-items-center">
+        <div class="el-title card-num">🔢 Card Number</div>
+        <label class="toggle-vis mb-0">
+          <input type="checkbox" id="show-card-num" checked onchange="toggleEl('card-num')">
+          <span>Show</span>
+        </label>
+      </div>
+      <div class="coord-row">
+        <div><div class="coord-label">X (left)</div>
+          <input class="coord-inp" id="cn-x" type="number" value="45" onchange="updateFromInputs('card-num')"></div>
+        <div><div class="coord-label">Y (top)</div>
+          <input class="coord-inp" id="cn-y" type="number" value="50" onchange="updateFromInputs('card-num')"></div>
+      </div>
+      <div class="coord-row">
+        <div><div class="coord-label">Font size</div>
+          <input class="coord-inp" id="cn-size" type="number" value="38" onchange="rebuildJson()"></div>
+        <div><div class="coord-label">Color</div>
+          <input class="coord-inp" id="cn-color" type="color" value="#185a3f" onchange="rebuildJson()"></div>
+      </div>
+      <button class="btn-place" id="place-card-num" style="border-color:#16a34a;color:#16a34a"
+              onclick="startPlace('card-num')">📍 Click to place</button>
+    </div>
+
+    <!-- Name -->
+    <div class="el-card" id="ctrl-name">
+      <div class="d-flex justify-content-between align-items-center">
+        <div class="el-title name">✍️ Guest Name</div>
+        <label class="toggle-vis mb-0">
+          <input type="checkbox" id="show-name" checked onchange="toggleEl('name')">
+          <span>Show</span>
+        </label>
+      </div>
+      <div class="coord-row">
+        <div><div class="coord-label">Centre X</div>
+          <input class="coord-inp" id="nm-cx" type="number" value="303" onchange="updateFromInputs('name')"></div>
+        <div><div class="coord-label">Centre Y</div>
+          <input class="coord-inp" id="nm-cy" type="number" value="550" onchange="updateFromInputs('name')"></div>
+      </div>
+      <div class="coord-row">
+        <div><div class="coord-label">Max width</div>
+          <input class="coord-inp" id="nm-w" type="number" value="358" onchange="rebuildJson()"></div>
+        <div><div class="coord-label">Color</div>
+          <input class="coord-inp" id="nm-color" type="color" value="#000000" onchange="rebuildJson()"></div>
+      </div>
+      <button class="btn-place" id="place-name" style="border-color:#2563eb;color:#2563eb"
+              onclick="startPlace('name')">📍 Click to place</button>
+    </div>
+
+    <!-- QR -->
+    <div class="el-card" id="ctrl-qr">
+      <div class="d-flex justify-content-between align-items-center">
+        <div class="el-title qr">📷 QR Code</div>
+        <label class="toggle-vis mb-0">
+          <input type="checkbox" id="show-qr" checked onchange="toggleEl('qr')">
+          <span>Show</span>
+        </label>
+      </div>
+      <div class="coord-row">
+        <div><div class="coord-label">X (left)</div>
+          <input class="coord-inp" id="qr-x" type="number" value="45" onchange="updateFromInputs('qr')"></div>
+        <div><div class="coord-label">Y (top)</div>
+          <input class="coord-inp" id="qr-y" type="number" value="1503" onchange="updateFromInputs('qr')"></div>
+      </div>
+      <div class="coord-row">
+        <div><div class="coord-label">Size (px)</div>
+          <input class="coord-inp" id="qr-size" type="number" value="200" onchange="syncQrSize(); rebuildJson()"></div>
+      </div>
+      <button class="btn-place" id="place-qr" style="border-color:#9333ea;color:#9333ea"
+              onclick="startPlace('qr')">📍 Click to place</button>
+    </div>
+
+    <!-- Card Type -->
+    <div class="el-card" id="ctrl-card-type">
+      <div class="d-flex justify-content-between align-items-center">
+        <div class="el-title card-type">🏷️ Card Type</div>
+        <label class="toggle-vis mb-0">
+          <input type="checkbox" id="show-card-type" checked onchange="toggleEl('card-type')">
+          <span>Show</span>
+        </label>
+      </div>
+      <div class="coord-row">
+        <div><div class="coord-label">Font size</div>
+          <input class="coord-inp" id="ct-size" type="number" value="36" onchange="rebuildJson()"></div>
+        <div><div class="coord-label">Gap above QR</div>
+          <input class="coord-inp" id="ct-gap" type="number" value="20" onchange="rebuildJson()"></div>
+      </div>
+      <div class="coord-row">
+        <div><div class="coord-label">Color</div>
+          <input class="coord-inp" id="ct-color" type="color" value="#185a3f" onchange="rebuildJson()"></div>
+      </div>
+      <p class="text-muted" style="font-size:.7rem">Card type is placed above the QR box automatically.</p>
+    </div>
+
+    <!-- JSON output -->
+    <div class="el-title" style="color:#475569;margin-top:.5rem">Generated JSON</div>
+    <div id="json-out">{}</div>
+
+    <button class="btn-save" id="btn-save" onclick="saveLayout()">
+      💾 Save Layout to Event
+    </button>
+    <span class="save-badge" id="save-badge">✓ Saved!</span>
+    <a href="{{ url_for('event_edit', event_id=event.id) }}"
+       class="btn btn-outline-secondary w-100 mt-2" style="font-size:.85rem">
+      ← Back to Event Settings
+    </a>
+    <a href="{{ url_for('event_preview_card', event_id=event.id) }}"
+       target="_blank" class="btn btn-outline-success w-100 mt-2" style="font-size:.85rem">
+      👁 Preview Full Card
+    </a>
+  </div>
+
+  <!-- ── Canvas ────────────────────────────────────────────────────────── -->
+  <div class="canvas-area">
+    <div class="zoom-bar">
+      <span style="font-size:.8rem;color:#64748b">Zoom:</span>
+      <input type="range" min="20" max="100" value="50" id="zoom-slider"
+             oninput="setZoom(this.value)">
+      <span id="zoom-label" style="font-size:.8rem;color:#475569">50%</span>
+    </div>
+
+    {% if event.card_template_url %}
+    <div class="card-wrap" id="card-wrap" onclick="onCanvasClick(event)">
+      <img id="card-img" src="{{ event.card_template_url }}"
+           alt="Card Template" draggable="false"
+           onload="onImageLoad()" crossorigin="anonymous">
+      <!-- Draggable handles injected by JS -->
+      <div class="el-handle el-card-num" id="h-card-num"
+           style="left:0;top:0;min-width:80px;height:28px"
+           onmousedown="startDrag(event,'card-num')">NO. 0001<div class="resize-handle"></div></div>
+      <div class="el-handle el-name" id="h-name"
+           style="left:0;top:0;min-width:120px;height:28px"
+           onmousedown="startDrag(event,'name')">GUEST NAME<div class="resize-handle"></div></div>
+      <div class="el-handle el-qr" id="h-qr"
+           style="left:0;top:0;width:60px;height:60px"
+           onmousedown="startDrag(event,'qr')">QR<div class="resize-handle"></div></div>
+      <div class="el-handle el-card-type" id="h-card-type"
+           style="left:0;top:0;min-width:70px;height:24px"
+           onmousedown="startDrag(event,'card-type')">SINGLE<div class="resize-handle"></div></div>
+    </div>
+    <p class="crosshair-hint mt-2">
+      Drag elements to position them · Or click <strong>📍 Click to place</strong> then click the card
+    </p>
+    {% else %}
+    <div class="no-template">
+      <div style="font-size:3rem">🃏</div>
+      <p class="mt-2">No card template uploaded yet.<br>
+        <a href="{{ url_for('event_edit', event_id=event.id) }}">Upload a template first</a>
+      </p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Natural (full-resolution) card dimensions — filled when image loads
+let CARD_W = 1240, CARD_H = 1748;
+let scale  = 0.5;   // display scale
+
+let placing = null;  // which element we're about to place by click
+
+// Current positions in CARD coordinates (full resolution)
+const pos = {
+  'card-num':  { x: 45,   y: 50,   size: 38,  color: '#185a3f', show: true },
+  'name':      { cx: 303, y: 550,  maxW: 358, color: '#000000', show: true },
+  'qr':        { x: 45,   y: 1503, size: 200, show: true },
+  'card-type': { gap: 20, size: 36, color: '#185a3f', show: true },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INIT — load existing config if present
+// ═══════════════════════════════════════════════════════════════════════════
+
+const EXISTING = {{ event.card_layout_config | tojson }};
+window.addEventListener('DOMContentLoaded', () => {
+  if (EXISTING) {
+    try {
+      const cfg = JSON.parse(EXISTING);
+      if (cfg.card_num)  { pos['card-num'].x = cfg.card_num.x ?? 45; pos['card-num'].y = cfg.card_num.y ?? 50; pos['card-num'].size = cfg.card_num.size ?? 38; pos['card-num'].color = cfg.card_num.color ?? '#185a3f'; }
+      if (cfg.name)      { pos['name'].cx = cfg.name.cx ?? 303; pos['name'].y = cfg.name.y ?? 550; pos['name'].maxW = cfg.name.max_width ?? 358; pos['name'].color = cfg.name.color ?? '#000000'; }
+      if (cfg.qr)        { pos['qr'].x = cfg.qr.x ?? 45; pos['qr'].y = cfg.qr.y ?? 1503; pos['qr'].size = cfg.qr.size ?? 200; }
+      if (cfg.card_type) { pos['card-type'].gap = cfg.card_type.gap ?? 20; pos['card-type'].size = cfg.card_type.size ?? 36; pos['card-type'].color = cfg.card_type.color ?? '#185a3f'; }
+      if (cfg.show_card_num  === false) pos['card-num'].show  = false;
+      if (cfg.show_name      === false) pos['name'].show      = false;
+      if (cfg.show_qr        === false) pos['qr'].show        = false;
+      if (cfg.show_card_type === false) pos['card-type'].show = false;
+    } catch(e) {}
+  }
+  syncInputsFromPos();
+  if (document.getElementById('card-img')) {
+    if (document.getElementById('card-img').complete) onImageLoad();
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// IMAGE LOAD — set dimensions and render handles
+// ═══════════════════════════════════════════════════════════════════════════
+
+function onImageLoad() {
+  const img = document.getElementById('card-img');
+  CARD_W = img.naturalWidth  || 1240;
+  CARD_H = img.naturalHeight || 1748;
+  renderHandles();
+  rebuildJson();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ZOOM
+// ═══════════════════════════════════════════════════════════════════════════
+
+function setZoom(v) {
+  scale = v / 100;
+  document.getElementById('zoom-label').textContent = v + '%';
+  const img = document.getElementById('card-img');
+  if (!img) return;
+  img.style.width  = (CARD_W * scale) + 'px';
+  img.style.height = (CARD_H * scale) + 'px';
+  renderHandles();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RENDER HANDLES — convert card coords → display pixels
+// ═══════════════════════════════════════════════════════════════════════════
+
+function cardToDisplay(cardX, cardY) {
+  return { x: cardX * scale, y: cardY * scale };
+}
+function displayToCard(dispX, dispY) {
+  return { x: Math.round(dispX / scale), y: Math.round(dispY / scale) };
+}
+
+function renderHandles() {
+  placeHandle('card-num');
+  placeHandle('name');
+  placeHandle('qr');
+  placeHandle('card-type');
+}
+
+function placeHandle(el) {
+  const h = document.getElementById('h-' + el);
+  if (!h) return;
+  const p = pos[el];
+  if (!p.show) { h.classList.add('hidden'); return; }
+  h.classList.remove('hidden');
+
+  if (el === 'card-num') {
+    const d = cardToDisplay(p.x, p.y);
+    h.style.left = d.x + 'px'; h.style.top = d.y + 'px';
+    h.style.fontSize = Math.max(8, p.size * scale * 0.7) + 'px';
+  } else if (el === 'name') {
+    const d = cardToDisplay(p.cx, p.y);
+    const dispW = p.maxW * scale;
+    h.style.left = (d.x - dispW/2) + 'px';
+    h.style.top  = (d.y - 14*scale) + 'px';
+    h.style.width = dispW + 'px';
+    h.style.height = (28*scale) + 'px';
+  } else if (el === 'qr') {
+    const d = cardToDisplay(p.x, p.y);
+    const sz = p.size * scale;
+    h.style.left = d.x + 'px'; h.style.top = d.y + 'px';
+    h.style.width = sz + 'px'; h.style.height = sz + 'px';
+  } else if (el === 'card-type') {
+    // Show above QR
+    const qp = pos['qr'];
+    const approxH = pos['card-type'].size;
+    const d = cardToDisplay(qp.x, qp.y - approxH - pos['card-type'].gap);
+    h.style.left = d.x + 'px'; h.style.top = d.y + 'px';
+    h.style.fontSize = Math.max(7, approxH * scale * 0.6) + 'px';
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DRAG
+// ═══════════════════════════════════════════════════════════════════════════
+
+let dragging = null;
+let dragStart = null;
+let posStart  = null;
+
+function startDrag(e, el) {
+  if (e.target.classList.contains('resize-handle')) return; // let resize handle it
+  e.preventDefault();
+  dragging  = el;
+  dragStart = { x: e.clientX, y: e.clientY };
+  posStart  = { ...pos[el] };
+  document.addEventListener('mousemove', onDrag);
+  document.addEventListener('mouseup',   endDrag);
+}
+
+function onDrag(e) {
+  if (!dragging) return;
+  const dx = (e.clientX - dragStart.x) / scale;
+  const dy = (e.clientY - dragStart.y) / scale;
+  const p  = pos[dragging];
+  if (dragging === 'name') {
+    p.cx = Math.round(posStart.cx + dx);
+    p.y  = Math.round(posStart.y  + dy);
+    document.getElementById('nm-cx').value = p.cx;
+    document.getElementById('nm-cy').value = p.y;
+  } else if (dragging === 'card-num') {
+    p.x = Math.round(posStart.x + dx);
+    p.y = Math.round(posStart.y + dy);
+    document.getElementById('cn-x').value = p.x;
+    document.getElementById('cn-y').value = p.y;
+  } else if (dragging === 'qr' || dragging === 'card-type') {
+    const qp = pos['qr'];
+    qp.x = Math.round(posStart.x + dx);
+    qp.y = Math.round(posStart.y + dy);
+    document.getElementById('qr-x').value = qp.x;
+    document.getElementById('qr-y').value = qp.y;
+  }
+  renderHandles();
+  rebuildJson();
+}
+
+function endDrag() {
+  dragging = null;
+  document.removeEventListener('mousemove', onDrag);
+  document.removeEventListener('mouseup',   endDrag);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CLICK-TO-PLACE
+// ═══════════════════════════════════════════════════════════════════════════
+
+function startPlace(el) {
+  placing = el;
+  document.getElementById('card-wrap').style.cursor = 'crosshair';
+  // Highlight the active place button
+  document.querySelectorAll('.btn-place').forEach(b => b.style.fontWeight = '600');
+  document.getElementById('place-' + el).textContent = '🎯 Click on card now…';
+}
+
+function onCanvasClick(e) {
+  if (!placing) return;
+  const wrap = document.getElementById('card-wrap');
+  const rect = wrap.getBoundingClientRect();
+  const dispX = e.clientX - rect.left;
+  const dispY = e.clientY - rect.top;
+  const card  = displayToCard(dispX, dispY);
+
+  const p = pos[placing];
+  if (placing === 'name') {
+    p.cx = card.x; p.y = card.y;
+    document.getElementById('nm-cx').value = card.x;
+    document.getElementById('nm-cy').value = card.y;
+  } else if (placing === 'card-num') {
+    p.x = card.x; p.y = card.y;
+    document.getElementById('cn-x').value = card.x;
+    document.getElementById('cn-y').value = card.y;
+  } else if (placing === 'qr') {
+    p.x = card.x; p.y = card.y;
+    document.getElementById('qr-x').value = card.x;
+    document.getElementById('qr-y').value = card.y;
+  }
+
+  // Reset button label
+  const labels = {'card-num':'📍 Click to place','name':'📍 Click to place','qr':'📍 Click to place'};
+  document.getElementById('place-' + placing).textContent = labels[placing] || '📍 Click to place';
+  document.getElementById('card-wrap').style.cursor = 'default';
+  placing = null;
+  renderHandles();
+  rebuildJson();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS → POS
+// ═══════════════════════════════════════════════════════════════════════════
+
+function updateFromInputs(el) {
+  if (el === 'card-num') {
+    pos['card-num'].x = +document.getElementById('cn-x').value;
+    pos['card-num'].y = +document.getElementById('cn-y').value;
+  } else if (el === 'name') {
+    pos['name'].cx = +document.getElementById('nm-cx').value;
+    pos['name'].y  = +document.getElementById('nm-cy').value;
+  } else if (el === 'qr') {
+    pos['qr'].x = +document.getElementById('qr-x').value;
+    pos['qr'].y = +document.getElementById('qr-y').value;
+  }
+  renderHandles();
+  rebuildJson();
+}
+
+function syncInputsFromPos() {
+  document.getElementById('cn-x').value    = pos['card-num'].x;
+  document.getElementById('cn-y').value    = pos['card-num'].y;
+  document.getElementById('cn-size').value = pos['card-num'].size;
+  document.getElementById('cn-color').value= pos['card-num'].color;
+  document.getElementById('nm-cx').value   = pos['name'].cx;
+  document.getElementById('nm-cy').value   = pos['name'].y;
+  document.getElementById('nm-w').value    = pos['name'].maxW;
+  document.getElementById('nm-color').value= pos['name'].color;
+  document.getElementById('qr-x').value    = pos['qr'].x;
+  document.getElementById('qr-y').value    = pos['qr'].y;
+  document.getElementById('qr-size').value = pos['qr'].size;
+  document.getElementById('ct-size').value = pos['card-type'].size;
+  document.getElementById('ct-gap').value  = pos['card-type'].gap;
+  document.getElementById('ct-color').value= pos['card-type'].color;
+  document.getElementById('show-card-num').checked  = pos['card-num'].show;
+  document.getElementById('show-name').checked      = pos['name'].show;
+  document.getElementById('show-qr').checked        = pos['qr'].show;
+  document.getElementById('show-card-type').checked = pos['card-type'].show;
+}
+
+function syncQrSize() {
+  pos['qr'].size = +document.getElementById('qr-size').value;
+  renderHandles();
+}
+
+function toggleEl(el) {
+  const map = { 'card-num': 'show-card-num', 'name': 'show-name',
+                'qr': 'show-qr', 'card-type': 'show-card-type' };
+  pos[el].show = document.getElementById(map[el]).checked;
+  renderHandles();
+  rebuildJson();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// JSON BUILDER
+// ═══════════════════════════════════════════════════════════════════════════
+
+function rebuildJson() {
+  // Read latest values from inputs
+  pos['card-num'].size  = +document.getElementById('cn-size').value;
+  pos['card-num'].color = document.getElementById('cn-color').value;
+  pos['name'].maxW      = +document.getElementById('nm-w').value;
+  pos['name'].color     = document.getElementById('nm-color').value;
+  pos['qr'].size        = +document.getElementById('qr-size').value;
+  pos['card-type'].size = +document.getElementById('ct-size').value;
+  pos['card-type'].gap  = +document.getElementById('ct-gap').value;
+  pos['card-type'].color= document.getElementById('ct-color').value;
+
+  const cfg = {
+    card_num:  { x: pos['card-num'].x, y: pos['card-num'].y,
+                 size: pos['card-num'].size, color: pos['card-num'].color },
+    name:      { cx: pos['name'].cx, y: pos['name'].y,
+                 max_width: pos['name'].maxW, color: pos['name'].color },
+    qr:        { x: pos['qr'].x, y: pos['qr'].y, size: pos['qr'].size },
+    card_type: { gap: pos['card-type'].gap, size: pos['card-type'].size,
+                 color: pos['card-type'].color },
+    show_card_num:  pos['card-num'].show,
+    show_name:      pos['name'].show,
+    show_qr:        pos['qr'].show,
+    show_card_type: pos['card-type'].show,
+  };
+  document.getElementById('json-out').textContent = JSON.stringify(cfg, null, 2);
+  window._currentLayout = JSON.stringify(cfg);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SAVE
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function saveLayout() {
+  const btn = document.getElementById('btn-save');
+  btn.disabled = true; btn.textContent = '⏳ Saving…';
+  try {
+    const res = await fetch('/events/{{ event.id }}/save_layout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ layout_config: window._currentLayout }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      btn.textContent = '💾 Save Layout to Event';
+      const badge = document.getElementById('save-badge');
+      badge.classList.add('show');
+      setTimeout(() => badge.classList.remove('show'), 3000);
+    } else {
+      alert('Save failed: ' + data.error);
+    }
+  } catch(e) {
+    alert('Network error: ' + e);
+  }
+  btn.disabled = false;
+  btn.textContent = '💾 Save Layout to Event';
+}
+
+// Init zoom
+setZoom(50);
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

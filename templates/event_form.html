@@ -171,7 +171,13 @@
             onclick="applyPreset('nameonly')">Name + QR only</button>
   </div>
 
-  <button type="submit" class="btn btn-primary">Save Layout</button>
+  <div class="d-flex gap-2">
+    <button type="submit" class="btn btn-primary">Save Layout JSON</button>
+    {% if event %}
+    <a href="{{ url_for('event_layout_editor', event_id=event.id) }}"
+       class="btn btn-success">🎨 Open Visual Editor</a>
+    {% endif %}
+  </div>
   </form>
 
   <script>
