@@ -1146,12 +1146,15 @@ def download_excel():
         guests = db.query(Guest).filter_by(event_id=eid).all()
 
     def ct(g): return (g.card_type or "").strip().lower()
-    total_guests         = len(guests)
+    total_cards          = len(guests)
     single_cards         = sum(1 for g in guests if ct(g) == "single")
     double_cards         = sum(1 for g in guests if ct(g) == "double")
     family_cards         = sum(1 for g in guests if ct(g) == "family")
-    total_family_allowed = sum(g.group_size for g in guests if ct(g) == "family")
-    entered_guests       = sum(1 for g in guests if bool(g.has_entered))
+    # People counts — the real attendance numbers
+    total_people         = sum(g.group_size or 1 for g in guests)
+    people_in            = sum(g.checked_in_count or 0 for g in guests)
+    people_not_in        = total_people - people_in
+    cards_with_any_entry = sum(1 for g in guests if (g.checked_in_count or 0) >= 1)
 
     wb = Workbook()
     ws = wb.active
@@ -1160,17 +1163,23 @@ def download_excel():
     ws["A1"].font = Font(size=14, bold=True)
 
     for row_num, (label, value) in enumerate([
-        ("Total Guests", total_guests), ("Single Cards", single_cards),
-        ("Double Cards", double_cards), ("Family Cards", family_cards),
-        ("Total Allowed by Family Cards", total_family_allowed),
-        ("Guests Entered", entered_guests),
-        ("Guests Not Entered", total_guests - entered_guests),
+        ("Total Cards (Invitations)",  total_cards),
+        ("Total People (Capacity)",    total_people),
+        ("─── Card Breakdown ───",     ""),
+        ("Single Cards",               single_cards),
+        ("Double Cards",               double_cards),
+        ("Family / Group Cards",       family_cards),
+        ("─── Attendance ───",         ""),
+        ("People Checked In",          people_in),
+        ("People Not Yet In",          people_not_in),
+        ("Cards With Any Entry",       cards_with_any_entry),
+        ("Cards Not Yet Scanned",      total_cards - cards_with_any_entry),
     ], start=3):
         ws[f"A{row_num}"] = label; ws[f"B{row_num}"] = value
-        ws[f"A{row_num}"].font = Font(bold=True)
+        ws[f"A{row_num}"].font = Font(bold=True if "───" not in label else False)
 
     table_start = 11
-    headers = ["ID", "Name", "Phone", "QR Code ID", "Has Entered", "Entry Time",
+    headers = ["ID", "Name", "Phone", "QR Code ID", "Check-ins", "Entry Time",
                "Visual ID", "Card Type", "Group Size", "WhatsApp", "RSVP", "AT SMS Sent"]
     for col, h in enumerate(headers, 1):
         ws.cell(row=table_start, column=col, value=h).font = Font(bold=True)
@@ -1178,7 +1187,7 @@ def download_excel():
     for i, g in enumerate(guests, start=table_start + 1):
         ws.cell(i,1,g.id);       ws.cell(i,2,g.name);      ws.cell(i,3,g.phone)
         ws.cell(i,4,g.qr_code_id)
-        ws.cell(i,5,"Entered" if g.has_entered else "Not Entered")
+        ws.cell(i,5,f"{g.checked_in_count or 0}/{g.group_size or 1} people")
         ws.cell(i,6,fmt_eat(g.entry_time, '%Y-%m-%d %H:%M:%S') if g.entry_time else "")
         ws.cell(i,7,g.visual_id); ws.cell(i,8,g.card_type); ws.cell(i,9,g.group_size)
         ws.cell(i,10,"Yes" if g.has_whatsapp else ("No" if g.has_whatsapp is False else "Unknown"))
@@ -1188,11 +1197,10 @@ def download_excel():
     fdr = table_start + 1; ldr = table_start + len(guests)
     if ldr >= fdr:
         rng = f"E{fdr}:E{ldr}"
+        # Colour cells based on whether anyone has checked in (contains "/")
+        # Green if first char is not 0, red if "0/"
         ws.conditional_formatting.add(rng, CellIsRule(
-            operator="equal", formula=['"Entered"'],
-            fill=PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")))
-        ws.conditional_formatting.add(rng, CellIsRule(
-            operator="equal", formula=['"Not Entered"'],
+            operator="beginsWith", formula=['"0/"'],
             fill=PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")))
 
     for column in ws.columns:
@@ -1650,32 +1658,52 @@ def guest_report_data():
             "entry_time":       fmt_eat(g.entry_time, '%H:%M') if g.entry_time else None,
         }
  
-    total       = len(guests)
-    # A guest counts as entered if ANY scan has occurred (checked_in_count >= 1)
-    # This ensures double cards scanned once still appear as checked-in
+    # ── Card counts (number of cards/invitations) ───────────────────────────
+    total_cards   = len(guests)
+    single_cards  = sum(1 for g in guests if (g.card_type or '') == 'single')
+    double_cards  = sum(1 for g in guests if (g.card_type or '') == 'double')
+    family_cards  = sum(1 for g in guests if (g.card_type or '') == 'family')
+
+    # ── People counts (actual individuals, group_size defines capacity) ──────
+    # total_people  = sum of group_size across all cards (max capacity)
+    # people_in     = sum of checked_in_count (actual people who walked in)
+    # people_not_in = total_people - people_in
+    total_people  = sum(g.group_size or 1 for g in guests)
+    people_in     = sum(g.checked_in_count or 0 for g in guests)
+    people_not_in = total_people - people_in
+
+    # ── Card-level entered (any scan = card is "active") ─────────────────────
     entered     = [g for g in guests if (g.checked_in_count or 0) >= 1]
     not_entered = [g for g in guests if (g.checked_in_count or 0) == 0]
+
     attending   = [g for g in guests if g.rsvp_status == 'attending']
     declined    = [g for g in guests if g.rsvp_status == 'not_attending']
     no_rsvp     = [g for g in guests if not g.rsvp_status]
     wa_sent     = [g for g in guests if g.whatsapp_sent]
     wa_pending  = [g for g in guests if not g.whatsapp_sent]
     sms_sent    = [g for g in guests if g.at_sms_sent]
- 
+
     return jsonify({
-        "total_guests":       total,
-        "single_cards":       sum(1 for g in guests if (g.card_type or '') == 'single'),
-        "double_cards":       sum(1 for g in guests if (g.card_type or '') == 'double'),
-        "family_cards":       sum(1 for g in guests if (g.card_type or '') == 'family'),
+        # Card-level counts
+        "total_guests":       total_cards,   # cards (invitations)
+        "total_cards":        total_cards,
+        "single_cards":       single_cards,
+        "double_cards":       double_cards,
+        "family_cards":       family_cards,
         "entered_guests":     len(entered),
         "not_entered_guests": len(not_entered),
+        # People-level counts (the meaningful attendance numbers)
+        "total_people":       total_people,
+        "people_in":          people_in,
+        "people_not_in":      people_not_in,
+        # Comms
         "attending":          len(attending),
         "not_attending":      len(declined),
         "no_rsvp":            len(no_rsvp),
         "wa_sent":            len(wa_sent),
         "wa_pending":         len(wa_pending),
         "sms_sent":           len(sms_sent),
-        # lists (with rsvp_status — for internal report only)
+        # Lists for display
         "entered_list":       [g_dict(g) for g in entered],
         "not_entered_list":   [g_dict(g) for g in not_entered],
         "attending_list":     [g_dict(g) for g in attending],
@@ -2156,14 +2184,18 @@ def download_client_report():
         eid    = ev.id if ev else None
         guests = db.query(Guest).filter_by(event_id=eid).order_by(Guest.visual_id).all()
  
-    total         = len(guests)
-    # A guest counts as entered if ANY scan has occurred (checked_in_count >= 1)
-    entered       = [g for g in guests if (g.checked_in_count or 0) >= 1]
-    not_entered   = [g for g in guests if (g.checked_in_count or 0) == 0]
+    # Card counts
+    total_cards   = len(guests)
     single_count  = sum(1 for g in guests if (g.card_type or '') == 'single')
     double_count  = sum(1 for g in guests if (g.card_type or '') == 'double')
     family_count  = sum(1 for g in guests if (g.card_type or '') == 'family')
-    total_allowed = sum(g.group_size or 1 for g in guests)
+    # People counts — the real attendance numbers
+    total_people  = sum(g.group_size or 1 for g in guests)
+    people_in     = sum(g.checked_in_count or 0 for g in guests)
+    people_not_in = total_people - people_in
+    # Card-level entered (for the table lists)
+    entered       = [g for g in guests if (g.checked_in_count or 0) >= 1]
+    not_entered   = [g for g in guests if (g.checked_in_count or 0) == 0]
     generated_at  = now_eat().strftime("%d %B %Y, %H:%M")
  
     # ── colours ──────────────────────────────────────────────────────────────
@@ -2289,10 +2321,10 @@ def download_client_report():
     # ── Summary (NO "RSVP Yes" tile) ─────────────────────────────────────────
     story.append(Paragraph("Summary", S_SEC))
     story.append(stat_table([
-        ("Total Guests",  total,           C_GREEN),
-        ("Total Allowed", total_allowed,   C_GREEN),
-        ("Checked In",    len(entered),    C_GREEN),
-        ("Not In Yet",    len(not_entered), C_RED),
+        ("Total Cards",    total_cards,   C_GREEN),
+        ("Total People",   total_people,  C_GREEN),
+        ("People In",      people_in,     C_GREEN),
+        ("People Not In",  people_not_in, C_RED),
     ]))
     story.append(Spacer(1, 5))
     story.append(stat_table([
@@ -2302,7 +2334,8 @@ def download_client_report():
     ]))
  
     # ── Checked-in table (unchanged) ─────────────────────────────────────────
-    story.append(Paragraph(f"Checked In — {len(entered)} of {total} guests", S_SEC))
+    story.append(Paragraph(
+        f"Checked In — {len(entered)} card(s) · {people_in} of {total_people} people", S_SEC))
     story.append(HRFlowable(width="100%", thickness=0.4, color=C_BORDER, spaceAfter=5))
     story.append(guest_table(
         entered,
@@ -2313,7 +2346,8 @@ def download_client_report():
     ))
  
     # ── Not-checked-in table (NO RSVP column) ────────────────────────────────
-    story.append(Paragraph(f"Not Yet Checked In — {len(not_entered)} guests", S_SEC))
+    story.append(Paragraph(
+        f"Not Yet Checked In — {len(not_entered)} card(s) · {people_not_in} people remaining", S_SEC))
     story.append(HRFlowable(width="100%", thickness=0.4, color=C_BORDER, spaceAfter=5))
     story.append(guest_table(
         not_entered,
