@@ -202,7 +202,7 @@
                 data-wa-sent="{{ 'sent' if guest.whatsapp_sent else ('failed' if guest.whatsapp_error else 'pending') }}"
                 data-sms-sent="{{ 'sent' if guest.at_sms_sent else ('failed' if guest.at_sms_error else 'pending') }}"
                 data-rsvp="{{ guest.rsvp_status or 'none' }}">
-              <td>{{ "%04d"|format(guest.visual_id or 0) }}</td>
+              <td>{{ (guest.visual_id or 0)|string|zfill(4) }}</td>
               <td>{{ guest.name }}</td>
               <td>{{ guest.phone }}</td>
               <td>{{ (guest.card_type or 'single') | title }}</td>
@@ -212,7 +212,7 @@
                 {% if guest.whatsapp_sent %}
                   <span class="badge bg-success">Sent
                     {% if guest.whatsapp_sent_at %}
-                      <small>({{ guest.whatsapp_sent_at.strftime('%d %b %H:%M') }})</small>
+                      <small>({{ guest.whatsapp_sent_at | fmt_eat('%d %b %H:%M') }})</small>
                     {% endif %}
                   </span>
                 {% elif guest.whatsapp_error %}
@@ -227,7 +227,7 @@
                 {% if guest.at_sms_sent %}
                   <span class="badge bg-info text-white">Sent
                     {% if guest.at_sms_sent_at %}
-                      <small>({{ guest.at_sms_sent_at.strftime('%d %b %H:%M') }})</small>
+                      <small>({{ guest.at_sms_sent_at | fmt_eat('%d %b %H:%M') }})</small>
                     {% endif %}
                   </span>
                 {% elif guest.at_sms_error %}

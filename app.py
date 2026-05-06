@@ -444,6 +444,12 @@ def to_whatsapp_number(phone):
 
 app.jinja_env.globals.update(to_whatsapp_number=to_whatsapp_number, url_encode=url_encode)
 
+# Jinja filters
+def _jinja_fmt_eat(dt, fmt='%H:%M'):
+    return fmt_eat(dt, fmt) if dt else '—'
+app.jinja_env.filters['fmt_eat'] = _jinja_fmt_eat
+app.jinja_env.filters['zfill']   = lambda v, w: str(v).zfill(w)
+
 def get_safe_filename_name_part(name):
     return "".join(c if c.isalnum() else '_' for c in (name or "").upper())
 
@@ -1973,32 +1979,48 @@ def send_unified_single(guest_id):
 def send_unified_bulk():
     data   = request.get_json() or {}
     resend = data.get('resend', False)
-    with get_db_session() as db:
-        if resend:
-            ev  = get_active_event(db)
-            eid = ev.id if ev else None
-            guests = db.query(Guest).filter_by(event_id=eid).order_by(Guest.visual_id).all()
-        else:
-            ev  = get_active_event(db)
-            eid = ev.id if ev else None
-            guests = db.query(Guest).filter(
-                Guest.event_id == eid,
-                ((Guest.whatsapp_sent == False) | (Guest.whatsapp_sent == None)),
-                ((Guest.at_sms_sent   == False) | (Guest.at_sms_sent   == None))
-            ).order_by(Guest.visual_id).all()
 
-        totals = {"total": len(guests), "wa_sent": 0, "wa_failed": 0,
-                  "sms_sent": 0, "sms_failed": 0, "errors": []}
-        for guest in guests:
-            result = _send_to_guest(guest, db, send_wa=True, send_sms=True, event=ev)
+    # Fetch guest IDs and event in a short session, then close it
+    with get_db_session() as db:
+        ev  = get_active_event(db)
+        eid = ev.id if ev else None
+        if resend:
+            guest_ids = [g.id for g in
+                         db.query(Guest).filter_by(event_id=eid)
+                         .order_by(Guest.visual_id).all()]
+        else:
+            guest_ids = [g.id for g in
+                         db.query(Guest).filter(
+                             Guest.event_id == eid,
+                             ((Guest.whatsapp_sent == False) | (Guest.whatsapp_sent == None)),
+                             ((Guest.at_sms_sent   == False) | (Guest.at_sms_sent   == None))
+                         ).order_by(Guest.visual_id).all()]
+        # Snapshot event for SMS/WA config (detached from session)
+        ev_id = ev.id if ev else None
+
+    totals = {"total": len(guest_ids), "wa_sent": 0, "wa_failed": 0,
+              "sms_sent": 0, "sms_failed": 0, "errors": []}
+
+    for gid in guest_ids:
+        try:
+            with get_db_session() as db:
+                guest = db.get(Guest, gid)
+                if not guest:
+                    continue
+                ev = db.get(Event, ev_id) if ev_id else None
+                result = _send_to_guest(guest, db, send_wa=True, send_sms=True, event=ev)
             if result["wa"]  == "sent":                  totals["wa_sent"]    += 1
             elif result["wa"]  in ("failed", "invalid"): totals["wa_failed"]  += 1
             if result["sms"] == "sent":                  totals["sms_sent"]   += 1
             elif result["sms"] == "failed":              totals["sms_failed"] += 1
             if result["overall"] == "failed":
                 totals["errors"].append({"name": guest.name, "error": result["message"]})
-            time.sleep(0.1)
-        return jsonify(totals)
+        except Exception as e:
+            totals["wa_failed"] += 1
+            totals["errors"].append({"name": f"ID {gid}", "error": str(e)})
+        time.sleep(0.15)
+
+    return jsonify(totals)
 
 
 # ── WhatsApp only — single ────────────────────────────────────────────────────
@@ -2023,31 +2045,44 @@ def send_card_single(guest_id):
 def send_cards_bulk():
     data   = request.get_json() or {}
     resend = data.get('resend', False)
-    with get_db_session() as db:
-        if resend:
-            ev  = get_active_event(db)
-            eid = ev.id if ev else None
-            guests = db.query(Guest).filter_by(event_id=eid).order_by(Guest.visual_id).all()
-        else:
-            ev  = get_active_event(db)
-            eid = ev.id if ev else None
-            guests = db.query(Guest).filter(
-                Guest.event_id == eid,
-                (Guest.whatsapp_sent == False) | (Guest.whatsapp_sent == None)
-            ).order_by(Guest.visual_id).all()
 
-        sent = failed = 0
-        errors = []
-        for guest in guests:
-            result = _send_to_guest(guest, db, send_wa=True, send_sms=False, event=ev)
+    with get_db_session() as db:
+        ev  = get_active_event(db)
+        eid = ev.id if ev else None
+        if resend:
+            guest_ids = [g.id for g in
+                         db.query(Guest).filter_by(event_id=eid)
+                         .order_by(Guest.visual_id).all()]
+        else:
+            guest_ids = [g.id for g in
+                         db.query(Guest).filter(
+                             Guest.event_id == eid,
+                             (Guest.whatsapp_sent == False) | (Guest.whatsapp_sent == None)
+                         ).order_by(Guest.visual_id).all()]
+        ev_id = ev.id if ev else None
+
+    sent = failed = 0
+    errors = []
+    for gid in guest_ids:
+        try:
+            with get_db_session() as db:
+                guest = db.get(Guest, gid)
+                if not guest:
+                    continue
+                ev = db.get(Event, ev_id) if ev_id else None
+                result = _send_to_guest(guest, db, send_wa=True, send_sms=False, event=ev)
             if result["wa"] == "sent":
                 sent += 1
             else:
                 failed += 1
                 if result["overall"] == "failed":
                     errors.append({"name": guest.name, "error": result["message"]})
-            time.sleep(0.1)
-        return jsonify(total=len(guests), sent=sent, failed=failed, errors=errors)
+        except Exception as e:
+            failed += 1
+            errors.append({"name": f"ID {gid}", "error": str(e)})
+        time.sleep(0.15)
+
+    return jsonify(total=len(guest_ids), sent=sent, failed=failed, errors=errors)
 
 
 # ── SMS only — single ─────────────────────────────────────────────────────────
@@ -2072,32 +2107,44 @@ def send_at_sms_single(guest_id):
 def send_at_sms_bulk():
     data   = request.get_json() or {}
     resend = data.get("resend", False)
-    with get_db_session() as db:
-        if resend:
-            ev  = get_active_event(db)
-            eid = ev.id if ev else None
-            guests = db.query(Guest).filter_by(event_id=eid).all()
-        else:
-            ev  = get_active_event(db)
-            eid = ev.id if ev else None
-            guests = db.query(Guest).filter(
-                Guest.event_id == eid,
-                (Guest.at_sms_sent == None) | (Guest.at_sms_sent == False)
-            ).all()
 
-        sent_count = failed_count = 0
-        errors = []
-        for guest in guests:
-            result = _send_to_guest(guest, db, send_wa=False, send_sms=True, event=ev)
+    with get_db_session() as db:
+        ev  = get_active_event(db)
+        eid = ev.id if ev else None
+        if resend:
+            guest_ids = [g.id for g in
+                         db.query(Guest).filter_by(event_id=eid).all()]
+        else:
+            guest_ids = [g.id for g in
+                         db.query(Guest).filter(
+                             Guest.event_id == eid,
+                             (Guest.at_sms_sent == None) | (Guest.at_sms_sent == False)
+                         ).all()]
+        ev_id = ev.id if ev else None
+
+    sent_count = failed_count = 0
+    errors = []
+    for gid in guest_ids:
+        try:
+            with get_db_session() as db:
+                guest = db.get(Guest, gid)
+                if not guest:
+                    continue
+                ev = db.get(Event, ev_id) if ev_id else None
+                result = _send_to_guest(guest, db, send_wa=False, send_sms=True, event=ev)
             if result["sms"] == "sent":
                 sent_count += 1
             else:
                 failed_count += 1
                 if result["overall"] == "failed":
                     errors.append({"name": guest.name, "error": result["message"]})
-            time.sleep(0.1)
-        return jsonify(total=len(guests), sent=sent_count,
-                       failed=failed_count, errors=errors)
+        except Exception as e:
+            failed_count += 1
+            errors.append({"name": f"ID {gid}", "error": str(e)})
+        time.sleep(0.15)
+
+    return jsonify(total=len(guest_ids), sent=sent_count,
+                   failed=failed_count, errors=errors)
 
 
 # -------------------- send_cards page --------------------
