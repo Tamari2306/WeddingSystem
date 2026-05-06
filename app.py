@@ -1838,7 +1838,7 @@ def _send_to_guest(guest, db, send_wa=True, send_sms=True, event=None):
 
     # ── WhatsApp ──────────────────────────────────────────────────────────
     if send_wa:
-        logging.info("[WA] Starting WA send for guest: {guest.name} | phone: {phone}")
+        logging.info(f"[WA] Starting WA send for guest: {guest.name} | phone: {phone}")
         try:
             card_fname = card_filename_from_guest(guest)
             logging.info("[WA] Card filename: {card_fname}")
@@ -1893,8 +1893,8 @@ def _send_to_guest(guest, db, send_wa=True, send_sms=True, event=None):
             import traceback
             err_str = str(e)[:500]
             tb      = traceback.format_exc()
-            logging.error("[WA] WA send failed for {guest.name}: {err_str}")
-            logging.error("[WA] Traceback:\n{tb}")
+            logging.error(f"[WA] WA send failed for {guest.name}: {err_str}")
+            logging.error(f"[WA] Traceback:\n{tb}")
             guest.whatsapp_sent  = False
             guest.whatsapp_error = err_str
             wa_status = "failed"

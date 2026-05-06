@@ -290,11 +290,20 @@ const pos = {
 // INIT — load existing config if present
 // ═══════════════════════════════════════════════════════════════════════════
 
-const EXISTING = {{ event.card_layout_config | tojson }};
+// card_layout_config is stored as a JSON string in the DB.
+// Output it directly (safe — server-controlled content) and parse once.
+let EXISTING = null;
+try {
+  const _raw = {{ event.card_layout_config | tojson }};
+  // _raw is the DB string value. If it's already an object somehow, use it;
+  // if it's a string (normal case), parse it.
+  EXISTING = (typeof _raw === 'string') ? JSON.parse(_raw) : _raw;
+} catch(e) { EXISTING = null; }
+
 window.addEventListener('DOMContentLoaded', () => {
   if (EXISTING) {
     try {
-      const cfg = JSON.parse(EXISTING);
+      const cfg = EXISTING;
       if (cfg.card_num)  { pos['card-num'].x = cfg.card_num.x ?? 45; pos['card-num'].y = cfg.card_num.y ?? 50; pos['card-num'].size = cfg.card_num.size ?? 38; pos['card-num'].color = cfg.card_num.color ?? '#185a3f'; }
       if (cfg.name)      { pos['name'].cx = cfg.name.cx ?? 303; pos['name'].y = cfg.name.y ?? 550; pos['name'].maxW = cfg.name.max_width ?? 358; pos['name'].color = cfg.name.color ?? '#000000'; }
       if (cfg.qr)        { pos['qr'].x = cfg.qr.x ?? 45; pos['qr'].y = cfg.qr.y ?? 1503; pos['qr'].size = cfg.qr.size ?? 200; }
@@ -303,7 +312,7 @@ window.addEventListener('DOMContentLoaded', () => {
       if (cfg.show_name      === false) pos['name'].show      = false;
       if (cfg.show_qr        === false) pos['qr'].show        = false;
       if (cfg.show_card_type === false) pos['card-type'].show = false;
-    } catch(e) {}
+    } catch(e) { console.warn('Layout config parse error:', e); }
   }
   syncInputsFromPos();
   if (document.getElementById('card-img')) {
