@@ -521,15 +521,16 @@ def build_sms_message(guest, event=None) -> str:
     return (
         f"MWALIKO\n"
         f"Habari {guest.name},\n"
-        f"Mwaliko wa {type_label} ya:\n"
+        f"Tafadhali pokea mwaliko wa {type_label} ya:\n"
         f"{weds.upper()}\n"
         f"{day.upper()}, {date.upper()}\n"
         f"Saa 12:00 Jioni\n"
         f"{venue.upper()}\n"
         f"\n"
         f"Kadi No: {str(guest.visual_id or 0).zfill(4)} - {(guest.card_type or 'Single').title()}\n"
-        f"Fika na kadi hii ukumbini.\n"
-        f"Karibu sana! - SwiftInvite"
+        f"\n"
+        f"Tafadhali Fika na kadi hii ukumbini.\n"
+        f"Karibu sana!"
     )
 
 
